@@ -7,15 +7,12 @@ module partition
 import memory
 import stat
 import klock
-import event
 import event.eventstruct
 import resource
 import lib
 import fs
 
-const (
-	gpt_signature = u64(0x5452415020494645)
-)
+const gpt_signature = u64(0x5452415020494645)
 
 struct Partition {
 pub mut:
@@ -117,7 +114,7 @@ pub fn scan_partitions(mut parent_device resource.Resource, prefix string) int {
 		return -1
 	}
 
-	gpt_hdr := unsafe { &GPTPartitionTableHDR(lba_buffer)[0] }
+	gpt_hdr := unsafe { *&GPTPartitionTableHDR(lba_buffer) }
 
 	if gpt_hdr.identifier == partition.gpt_signature {
 		entry_list_lba := gpt_hdr.partition_array_lba
@@ -149,7 +146,7 @@ pub fn scan_partitions(mut parent_device resource.Resource, prefix string) int {
 
 			mut partition := &Partition{
 				device_offset: u64(partition_entry.starting_lba * parent_device.stat.blksize)
-				sector_cnt: partition_entry.last_lba - partition_entry.starting_lba
+				sector_cnt:    partition_entry.last_lba - partition_entry.starting_lba
 				parent_device: unsafe { parent_device }
 			}
 
@@ -187,7 +184,7 @@ pub fn scan_partitions(mut parent_device resource.Resource, prefix string) int {
 
 			mut partition := &Partition{
 				device_offset: u64(partition_entry.starting_lba * parent_device.stat.blksize)
-				sector_cnt: partition_entry.sector_cnt
+				sector_cnt:    partition_entry.sector_cnt
 				parent_device: unsafe { parent_device }
 			}
 

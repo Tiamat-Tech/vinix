@@ -24,7 +24,6 @@ __global (
 	scheduler_vector        u8
 	scheduler_running_queue [512]&proc.Thread
 	kernel_process          &proc.Process
-	working_cpus            = u64(0)
 )
 
 pub fn initialise() {
@@ -39,21 +38,28 @@ pub fn initialise() {
 	}
 }
 
-fn get_next_thread(orig_i int) int {
-	cpu_number := cpulocal.current().cpu_number
+fn get_next_thread() &proc.Thread {
+	mut cpu_local := cpulocal.current()
+
+	mut orig_i := cpu_local.last_run_queue_index
+
+	if orig_i >= sched.max_running_threads {
+		orig_i = 0
+	}
 
 	mut index := orig_i + 1
 
 	for {
-		if index >= scheduler_running_queue.len {
+		if index >= sched.max_running_threads {
 			index = 0
 		}
 
 		mut t := scheduler_running_queue[index]
 
 		if unsafe { t != 0 } {
-			if katomic.load(t.running_on) == cpu_number || t.l.test_and_acquire() == true {
-				return index
+			if t.l.test_and_acquire() == true {
+				cpu_local.last_run_queue_index = index
+				return t
 			}
 		}
 
@@ -64,7 +70,8 @@ fn get_next_thread(orig_i int) int {
 		index++
 	}
 
-	return -1
+	cpu_local.last_run_queue_index = index
+	return unsafe { nil }
 }
 
 fn C.userland__dispatch_a_signal(context &cpulocal.GPRState)
@@ -74,16 +81,16 @@ fn scheduler_isr(_ u32, gpr_state &cpulocal.GPRState) {
 
 	mut cpu_local := cpulocal.current()
 
-	katomic.store(cpu_local.is_idle, false)
+	katomic.store(mut &cpu_local.is_idle, false)
 
 	mut current_thread := proc.current_thread()
 
-	new_index := get_next_thread(cpu_local.last_run_queue_index)
+	mut next_thread := get_next_thread()
 
 	if unsafe { current_thread != 0 } {
 		current_thread.yield_await.release()
 
-		if new_index == cpu_local.last_run_queue_index {
+		if unsafe { next_thread == nil } && current_thread.is_in_queue {
 			apic.lapic_eoi()
 			apic.lapic_timer_oneshot(mut cpu_local, scheduler_vector, current_thread.timeslice)
 			return
@@ -95,34 +102,26 @@ fn scheduler_isr(_ u32, gpr_state &cpulocal.GPRState) {
 		current_thread.fs_base = cpu.get_fs_base()
 		current_thread.cr3 = cpu.read_cr3()
 		fpu_save(current_thread.fpu_storage)
-		katomic.store(current_thread.running_on, u64(-1))
+		katomic.store(mut &current_thread.running_on, u64(-1))
 		current_thread.l.release()
-
-		katomic.dec(working_cpus)
 	}
 
-	if new_index == -1 {
+	if unsafe { next_thread == nil } {
 		apic.lapic_eoi()
-		cpu.set_gs_base(voidptr(&cpu_local.cpu_number))
-		cpu.set_kernel_gs_base(voidptr(&cpu_local.cpu_number))
-		cpu_local.last_run_queue_index = 0
-		katomic.store(cpu_local.is_idle, true)
-		if katomic.load(waiting_event_count) == 0 && katomic.load(working_cpus) == 0 {
-			panic('Event heartbeat has flatlined :(')
-		}
+		cpu.set_gs_base(u64(&cpu_local.cpu_number))
+		cpu.set_kernel_gs_base(u64(&cpu_local.cpu_number))
+		katomic.store(mut &cpu_local.is_idle, true)
+		kernel_pagemap.switch_to()
 		await()
 	}
 
-	katomic.inc(working_cpus)
+	current_thread = next_thread
 
-	current_thread = scheduler_running_queue[new_index]
-	cpu_local.last_run_queue_index = new_index
-
-	cpu.set_gs_base(voidptr(current_thread))
+	cpu.set_gs_base(u64(current_thread))
 	if current_thread.gpr_state.cs == 0x43 {
 		cpu.set_kernel_gs_base(current_thread.gs_base)
 	} else {
-		cpu.set_kernel_gs_base(voidptr(current_thread))
+		cpu.set_kernel_gs_base(u64(current_thread))
 	}
 	cpu.set_fs_base(current_thread.fs_base)
 
@@ -134,7 +133,7 @@ fn scheduler_isr(_ u32, gpr_state &cpulocal.GPRState) {
 
 	fpu_restore(current_thread.fpu_storage)
 
-	katomic.store(current_thread.running_on, cpu_local.cpu_number)
+	katomic.store(mut &current_thread.running_on, cpu_local.cpu_number)
 
 	apic.lapic_eoi()
 	apic.lapic_timer_oneshot(mut cpu_local, scheduler_vector, current_thread.timeslice)
@@ -142,7 +141,7 @@ fn scheduler_isr(_ u32, gpr_state &cpulocal.GPRState) {
 	new_gpr_state := &current_thread.gpr_state
 
 	if new_gpr_state.cs == user_code_seg {
-		//C.userland__dispatch_a_signal(new_gpr_state)
+		// C.userland__dispatch_a_signal(new_gpr_state)
 	}
 
 	asm volatile amd64 {
@@ -183,15 +182,17 @@ pub fn enqueue_thread(_thread &proc.Thread, by_signal bool) bool {
 		return true
 	}
 
-	katomic.store(t.enqueued_by_signal, by_signal)
+	katomic.store(mut &t.enqueued_by_signal, by_signal)
 
-	for i := u64(0); i < scheduler_running_queue.len; i++ {
-		if katomic.cas(voidptr(&scheduler_running_queue[i]), voidptr(0), voidptr(t)) {
+	for i := u64(0); i < sched.max_running_threads; i++ {
+		if katomic.cas[&proc.Thread](mut &scheduler_running_queue[i], unsafe { nil },
+			t)
+		{
 			t.is_in_queue = true
 
 			// Check if any CPU is idle and wake it up
 			for cpu in cpu_locals {
-				if katomic.load(cpu.is_idle) == true {
+				if katomic.load(&cpu.is_idle) == true {
 					apic.lapic_send_ipi(u8(cpu.lapic_id), scheduler_vector)
 					break
 				}
@@ -211,8 +212,8 @@ pub fn dequeue_thread(_thread &proc.Thread) bool {
 		return true
 	}
 
-	for i := u64(0); i < scheduler_running_queue.len; i++ {
-		if katomic.cas(voidptr(&scheduler_running_queue[i]), voidptr(t), voidptr(0)) {
+	for i := u64(0); i < sched.max_running_threads; i++ {
+		if katomic.cas[&proc.Thread](mut &scheduler_running_queue[i], t, unsafe { nil }) {
 			t.is_in_queue = false
 			return true
 		}
@@ -257,8 +258,8 @@ pub fn yield(save_ctx bool) {
 	if save_ctx == true {
 		current_thread.yield_await.acquire()
 	} else {
-		cpu.set_gs_base(voidptr(&cpu_local.cpu_number))
-		cpu.set_kernel_gs_base(voidptr(&cpu_local.cpu_number))
+		cpu.set_gs_base(u64(&cpu_local.cpu_number))
+		cpu.set_kernel_gs_base(u64(&cpu_local.cpu_number))
 	}
 
 	apic.lapic_send_ipi(u8(cpu_local.lapic_id), scheduler_vector)
@@ -294,12 +295,12 @@ pub fn dequeue_and_die() {
 	}
 	mut t := proc.current_thread()
 	dequeue_thread(t)
-	for ptr in t.stacks {
-		memory.pmm_free(ptr, sched.stack_size / page_size)
-	}
+	// for ptr in t.stacks {
+	// memory.pmm_free(ptr, sched.stack_size / page_size)
+	//}
 	unsafe {
-		t.stacks.free()
-		free(t)
+		// t.stacks.free()
+		// free(t)
 	}
 	yield(false)
 	for {}
@@ -313,27 +314,29 @@ pub fn new_kernel_thread(pc voidptr, arg voidptr, autoenqueue bool) &proc.Thread
 	stack := u64(stack_phys) + sched.stack_size + higher_half
 
 	gpr_state := cpulocal.GPRState{
-		cs: kernel_code_seg
-		ds: kernel_data_seg
-		es: kernel_data_seg
-		ss: kernel_data_seg
+		cs:     kernel_code_seg
+		ds:     kernel_data_seg
+		es:     kernel_data_seg
+		ss:     kernel_data_seg
 		rflags: 0x202
-		rip: u64(pc)
-		rdi: u64(arg)
-		rbp: u64(0)
-		rsp: stack
+		rip:    u64(pc)
+		rdi:    u64(arg)
+		rbp:    u64(0)
+		rsp:    stack
 	}
 
 	mut t := &proc.Thread{
-		process: kernel_process
-		cr3: u64(kernel_process.pagemap.top_level)
-		gpr_state: gpr_state
-		timeslice: 5000
-		running_on: u64(-1)
-		stacks: stacks
+		process:     kernel_process
+		cr3:         u64(kernel_process.pagemap.top_level)
+		gpr_state:   gpr_state
+		timeslice:   5000
+		running_on:  u64(-1)
+		stacks:      stacks
 		fpu_storage: voidptr(u64(memory.pmm_alloc(lib.div_roundup(fpu_storage_size, page_size))) +
 			higher_half)
 	}
+
+	unsafe { stacks.free() }
 
 	t.self = voidptr(t)
 	t.gs_base = u64(voidptr(t))
@@ -349,15 +352,18 @@ pub fn syscall_new_thread(_ voidptr, pc voidptr, stack u64) (u64, u64) {
 	mut current_thread := proc.current_thread()
 	mut process := current_thread.process
 
-	C.printf(c'\n\e[32m%s\e[m: new_thread(0x%llx, 0x%llx)\n', process.name.str, pc,
-		stack)
+	C.printf(c'\n\e[32m%s\e[m: new_thread(0x%llx, 0x%llx)\n', process.name.str, pc, stack)
 	defer {
 		C.printf(c'\e[32m%s\e[m: returning\n', process.name.str)
 	}
 
-	mut new_thread := new_user_thread(process, false, pc, voidptr(0), stack, [], [], voidptr(0), false) or {
-		return errno.err, errno.get()
+	mut empty_string_array := []string{}
+	defer {
+		unsafe { empty_string_array.free() }
 	}
+
+	mut new_thread := new_user_thread(process, false, pc, unsafe { nil }, stack, empty_string_array,
+		empty_string_array, unsafe { nil }, false) or { return errno.err, errno.get() }
 
 	enqueue_thread(new_thread, false)
 
@@ -368,6 +374,9 @@ pub fn new_user_thread(_process &proc.Process, want_elf bool, pc voidptr, arg vo
 	mut process := unsafe { _process }
 
 	mut stacks := []voidptr{}
+	defer {
+		unsafe { stacks.free() }
+	}
 
 	mut stack := &u64(0)
 	mut stack_vma := u64(0)
@@ -381,7 +390,7 @@ pub fn new_user_thread(_process &proc.Process, want_elf bool, pc voidptr, arg vo
 		stack_bottom_vma := process.thread_stack_top
 		process.thread_stack_top -= page_size
 
-		mmap.map_range(process.pagemap, stack_bottom_vma, u64(stack_phys), sched.stack_size,
+		mmap.map_range(mut process.pagemap, stack_bottom_vma, u64(stack_phys), sched.stack_size,
 			mmap.prot_read | mmap.prot_write, mmap.map_anonymous) or { return none }
 	} else {
 		stack = &u64(voidptr(_stack))
@@ -397,26 +406,26 @@ pub fn new_user_thread(_process &proc.Process, want_elf bool, pc voidptr, arg vo
 	pf_stack := u64(pf_stack_phys) + sched.stack_size + higher_half
 
 	gpr_state := cpulocal.GPRState{
-		cs: user_code_seg
-		ds: user_data_seg
-		es: user_data_seg
-		ss: user_data_seg
+		cs:     user_code_seg
+		ds:     user_data_seg
+		es:     user_data_seg
+		ss:     user_data_seg
 		rflags: 0x202
-		rip: u64(pc)
-		rdi: u64(arg)
-		rsp: u64(stack_vma)
+		rip:    u64(pc)
+		rdi:    u64(arg)
+		rsp:    u64(stack_vma)
 	}
 
 	mut t := &proc.Thread{
-		process: process
-		cr3: u64(process.pagemap.top_level)
-		gpr_state: gpr_state
-		timeslice: 5000
-		running_on: u64(-1)
+		process:      process
+		cr3:          u64(process.pagemap.top_level)
+		gpr_state:    gpr_state
+		timeslice:    5000
+		running_on:   u64(-1)
 		kernel_stack: kernel_stack
-		pf_stack: pf_stack
-		stacks: stacks
-		fpu_storage: voidptr(u64(memory.pmm_alloc(lib.div_roundup(fpu_storage_size, page_size))) +
+		pf_stack:     pf_stack
+		stacks:       stacks
+		fpu_storage:  voidptr(u64(memory.pmm_alloc(lib.div_roundup(fpu_storage_size, page_size))) +
 			higher_half)
 	}
 
@@ -478,6 +487,9 @@ pub fn new_user_thread(_process &proc.Process, want_elf bool, pc voidptr, arg vo
 			stack = &stack[-1]
 
 			stack = &stack[-2]
+			stack[0] = elf.at_secure
+			stack[1] = 0
+			stack = &stack[-2]
 			stack[0] = elf.at_entry
 			stack[1] = auxval.at_entry
 			stack = &stack[-2]
@@ -525,13 +537,10 @@ pub fn new_user_thread(_process &proc.Process, want_elf bool, pc voidptr, arg vo
 
 pub fn new_process(old_process &proc.Process, pagemap &memory.Pagemap) ?&proc.Process {
 	mut new_process := &proc.Process{
-		pagemap: 0
+		pagemap: unsafe { nil }
 	}
 
 	new_process.pid = proc.allocate_pid(new_process) or { return none }
-
-	new_process.threads = []&proc.Thread{}
-	new_process.children = []&proc.Process{}
 
 	if unsafe { old_process != 0 } {
 		new_process.ppid = old_process.pid

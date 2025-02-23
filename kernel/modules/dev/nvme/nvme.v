@@ -19,28 +19,22 @@ import block.partition
 import fs
 import katomic
 
-const (
-	nvme_class    = 0x1
-	nvme_subclass = 0x8
-	nvme_progif   = 0x2
-)
+const nvme_class = 0x1
+const nvme_subclass = 0x8
+const nvme_progif = 0x2
 
-const (
-	opcode_delete_sq     = 0x0
-	opcode_create_sq     = 0x1
-	opcode_delete_cq     = 0x4
-	opcode_create_cq     = 0x5
-	opcode_identify      = 0x6
-	opcode_abort         = 0x8
-	opcode_set_features  = 0x9
-	opcode_get_features  = 0xa
-	opcode_ns_management = 0xd
-	opcode_format_cmd    = 0x80
-)
+const opcode_delete_sq = 0x0
+const opcode_create_sq = 0x1
+const opcode_delete_cq = 0x4
+const opcode_create_cq = 0x5
+const opcode_identify = 0x6
+const opcode_abort = 0x8
+const opcode_set_features = 0x9
+const opcode_get_features = 0xa
+const opcode_ns_management = 0xd
+const opcode_format_cmd = 0x80
 
-const (
-	nvme_io_queue_cnt = 0x4
-)
+const nvme_io_queue_cnt = 0x4
 
 @[packed]
 struct NVMERegisters {
@@ -282,8 +276,7 @@ pub mut:
 
 struct NVMEController {
 pub mut:
-	pci_bar pci.PCIBar
-
+	pci_bar       pci.PCIBar
 	volatile regs          &NVMERegisters
 	volatile controller_id &NVMEControllerID
 
@@ -317,8 +310,7 @@ pub mut:
 	admin     bool
 	l         klock.Lock
 
-	parent_controller &NVMEController
-
+	parent_controller   &NVMEController
 	volatile submission_queue    &NVMECommand
 	volatile completion_queue    &NVMECompletion
 	volatile submission_doorbell &u32
@@ -399,15 +391,15 @@ fn (mut dev NVMENamespace) ioctl(handle voidptr, request u64, argp voidptr) ?int
 }
 
 fn (mut dev NVMENamespace) unref(handle voidptr) ? {
-	katomic.dec(dev.refcount)
+	katomic.dec(mut &dev.refcount)
 }
 
 fn (mut dev NVMENamespace) link(handle voidptr) ? {
-	katomic.inc(dev.stat.nlink)
+	katomic.inc(mut &dev.stat.nlink)
 }
 
 fn (mut dev NVMENamespace) unlink(handle voidptr) ? {
-	katomic.dec(dev.stat.nlink)
+	katomic.dec(mut &dev.stat.nlink)
 }
 
 fn (mut dev NVMENamespace) grow(handle voidptr, new_size u64) ? {
@@ -424,7 +416,8 @@ pub fn (mut namespace NVMENamespace) initialise(mut parent_controller NVMEContro
 	}
 	namespace.nsid = nsid
 	namespace.identity = &NVMENamespaceID(
-		u64(memory.pmm_alloc(lib.div_roundup<u64>(sizeof(NVMENamespaceID), page_size))) + higher_half)
+		u64(memory.pmm_alloc(lib.div_roundup[u64](sizeof(NVMENamespaceID), page_size))) +
+		higher_half)
 
 	mut new_command := &NVMECommand{}
 
@@ -452,7 +445,7 @@ pub fn (mut namespace NVMENamespace) initialise(mut parent_controller NVMEContro
 fn calculate_max_prps(mut c NVMEController, identity &NVMENamespaceID) u64 {
 	lba_shift := identity.lbaf_list[identity.flbas & 0xf].ds
 
-	shift := 12 + (c.regs.cap >> 48 & 0xf)
+	shift := 12 + ((c.regs.cap >> 48) & 0xf)
 	mut max_transfer_shift := u64(20)
 
 	if c.controller_id.mdts != 0 {
@@ -481,10 +474,10 @@ pub fn (mut pair NVMEQueuePair) initialise(mut parent_controller NVMEController,
 	pair.entry_cnt = parent_controller.queue_entries
 
 	pair.submission_queue = &NVMECommand(
-		u64(memory.pmm_alloc(lib.div_roundup<u64>(pair.entry_cnt * sizeof(NVMECommand), page_size))) +
+		u64(memory.pmm_alloc(lib.div_roundup[u64](pair.entry_cnt * sizeof(NVMECommand), page_size))) +
 		higher_half)
 	pair.completion_queue = &NVMECompletion(
-		u64(memory.pmm_alloc(lib.div_roundup<u64>(pair.entry_cnt * sizeof(NVMECompletion), page_size))) +
+		u64(memory.pmm_alloc(lib.div_roundup[u64](pair.entry_cnt * sizeof(NVMECompletion), page_size))) +
 		higher_half)
 
 	submission_offset := page_size + 2 * qid * (4 << parent_controller.strides)
@@ -614,7 +607,7 @@ pub fn (mut ns NVMENamespace) rw_lba(buffer voidptr, start u64, cnt u64, rw bool
 	}
 
 	mut prp_list := &u64(
-		u64(memory.pmm_alloc(lib.div_roundup<u64>(ns.max_prps * queue_pair.entry_cnt * sizeof(u64), page_size))) +
+		u64(memory.pmm_alloc(lib.div_roundup[u64](ns.max_prps * queue_pair.entry_cnt * sizeof(u64), page_size))) +
 		higher_half)
 
 	if (cnt * ns.stat.blksize) > page_size {
@@ -672,7 +665,8 @@ pub fn (mut ns NVMENamespace) rw_lba(buffer voidptr, start u64, cnt u64, rw bool
 
 fn (mut c NVMEController) get_controller_id() int {
 	c.controller_id = &NVMEControllerID(
-		u64(memory.pmm_alloc(lib.div_roundup<u64>(sizeof(NVMEControllerID), page_size))) + higher_half)
+		u64(memory.pmm_alloc(lib.div_roundup[u64](sizeof(NVMEControllerID), page_size))) +
+		higher_half)
 
 	mut new_command := &NVMECommand{}
 
@@ -705,7 +699,7 @@ pub fn (mut c NVMEController) initialise(pci_device &pci.PCIDevice) int {
 	minor_version := (c.regs.vs >> 8) & 0xff
 	tertiary_version := c.regs.vs & 0xff
 
-	print('nvme: Version Detected [$major_version:$minor_version:$tertiary_version]\n')
+	print('nvme: Version Detected [${major_version}:${minor_version}:${tertiary_version}]\n')
 
 	if (u64(c.regs.cap) & (u64(1) << 37)) == 0 {
 		print('nvme: NVME command set not supported\n')
@@ -739,16 +733,16 @@ pub fn (mut c NVMEController) initialise(pci_device &pci.PCIDevice) int {
 	}
 
 	c.queue_entries = c.regs.cap & 0xffff
-	c.strides = c.regs.cap >> 32 & 0xf
+	c.strides = (c.regs.cap >> 32) & 0xf
 
 	c.qid_bitmap.initialise(0xffff)
 
 	c.admin_queue = &NVMEQueuePair{
-		parent_controller: 0
-		submission_queue: 0
-		completion_queue: 0
-		completion_doorbell: 0
-		submission_doorbell: 0
+		parent_controller:   unsafe { nil }
+		submission_queue:    unsafe { nil }
+		completion_queue:    unsafe { nil }
+		completion_doorbell: unsafe { nil }
+		submission_doorbell: unsafe { nil }
 	}
 
 	if c.admin_queue.initialise(mut c, vect, 0, true) != 0 {
@@ -761,11 +755,11 @@ pub fn (mut c NVMEController) initialise(pci_device &pci.PCIDevice) int {
 	c.regs.acq = u64(c.admin_queue.completion_queue) - higher_half
 
 	c.regs.cc = (0 << 4) | // nvme command set
-	(0 << 11) | // ams = round robin
-	(0 << 14) | // no shutdown notifications
-	(6 << 16) | // io submission queue size 16 bytes
-	(4 << 20) | // io completion queue size 64 bytes
-	(1 << 0) // enable
+	 (0 << 11) | // ams = round robin
+	 (0 << 14) | // no shutdown notifications
+	 (6 << 16) | // io submission queue size 16 bytes
+	 (4 << 20) | // io completion queue size 64 bytes
+	 (1 << 0) // enable
 	for {
 		if c.regs.csts & (1 << 0) != 0 {
 			break
@@ -783,10 +777,10 @@ pub fn (mut c NVMEController) initialise(pci_device &pci.PCIDevice) int {
 	}
 
 	print('nvme: vendor ID: ${c.controller_id.vid:x}\n')
-	print('nvme: subsystem vendor ID: $c.controller_id.ssvid\n')
+	print('nvme: subsystem vendor ID: ${c.controller_id.ssvid}\n')
 
-	nsid_list := &u32(u64(memory.pmm_alloc(lib.div_roundup<u64>(c.controller_id.nn * 4, page_size))) +
-		higher_half)
+	nsid_list := &u32(
+		u64(memory.pmm_alloc(lib.div_roundup[u64](c.controller_id.nn * 4, page_size))) + higher_half)
 
 	mut new_command := &NVMECommand{}
 
@@ -806,11 +800,11 @@ pub fn (mut c NVMEController) initialise(pci_device &pci.PCIDevice) int {
 
 	for i := 0; i < nvme.nvme_io_queue_cnt; i++ {
 		mut new_io_queue := &NVMEQueuePair{
-			parent_controller: 0
-			submission_queue: 0
-			completion_queue: 0
-			submission_doorbell: 0
-			completion_doorbell: 0
+			parent_controller:   unsafe { nil }
+			submission_queue:    unsafe { nil }
+			completion_queue:    unsafe { nil }
+			submission_doorbell: unsafe { nil }
+			completion_doorbell: unsafe { nil }
 		}
 
 		if pci_device.msix_support == true {
@@ -827,8 +821,8 @@ pub fn (mut c NVMEController) initialise(pci_device &pci.PCIDevice) int {
 	for i := u64(0); i < c.controller_id.nn; i++ {
 		if unsafe { nsid_list[i] != 0 } {
 			mut new_namespace := &NVMENamespace{
-				parent_controller: 0
-				identity: 0
+				parent_controller: unsafe { nil }
+				identity:          unsafe { nil }
 			}
 
 			if new_namespace.initialise(mut c, unsafe { nsid_list[i] }) != 0 {
@@ -841,7 +835,7 @@ pub fn (mut c NVMEController) initialise(pci_device &pci.PCIDevice) int {
 			print('nvme: lba size: ${new_namespace.stat.blksize:x}\n')
 			print('nvme: max prps: ${new_namespace.max_prps:x}\n')
 
-			fs.devtmpfs_add_device(new_namespace, 'nvme${controller_list.len}n$i')
+			fs.devtmpfs_add_device(new_namespace, 'nvme${controller_list.len}n${i}')
 			partition.scan_partitions(mut new_namespace, 'nvme${controller_list.len}n${i}p')
 
 			c.namespace_list << new_namespace
@@ -856,9 +850,9 @@ pub fn initialise() {
 		if device.class == nvme.nvme_class && device.subclass == nvme.nvme_subclass
 			&& device.prog_if == nvme.nvme_progif {
 			mut nvme_device := &NVMEController{
-				regs: 0
-				controller_id: 0
-				admin_queue: 0
+				regs:          unsafe { nil }
+				controller_id: unsafe { nil }
+				admin_queue:   unsafe { nil }
 			}
 
 			if nvme_device.initialise(device) != -1 {

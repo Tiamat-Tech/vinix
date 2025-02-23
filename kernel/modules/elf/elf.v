@@ -17,25 +17,26 @@ pub mut:
 	at_phnum u64
 }
 
-pub const (
-	at_entry    = 9
-	at_phdr     = 3
-	at_phent    = 4
-	at_phnum    = 5
+pub const et_dyn = 0x03
 
-	pt_load     = 0x00000001
-	pt_interp   = 0x00000003
-	pt_phdr     = 0x00000006
+pub const at_entry = 9
+pub const at_phdr = 3
+pub const at_phent = 4
+pub const at_phnum = 5
+pub const at_secure = 23
 
-	abi_sysv    = 0x00
-	arch_x86_64 = 0x3e
-	bits_le     = 0x01
+pub const pt_load = 0x00000001
+pub const pt_interp = 0x00000003
+pub const pt_phdr = 0x00000006
 
-	ei_class    = 4
-	ei_data     = 5
-	ei_version  = 6
-	ei_osabi    = 7
-)
+pub const abi_sysv = 0x00
+pub const arch_x86_64 = 0x3e
+pub const bits_le = 0x01
+
+pub const ei_class = 4
+pub const ei_data = 5
+pub const ei_version = 6
+pub const ei_osabi = 7
 
 pub struct Header {
 pub mut:
@@ -55,11 +56,9 @@ pub mut:
 	shstrndx  u16
 }
 
-pub const (
-	pf_x = 1
-	pf_w = 2
-	pf_r = 4
-)
+pub const pf_x = 1
+pub const pf_w = 2
+pub const pf_r = 4
 
 pub struct ProgramHdr {
 pub mut:
@@ -104,9 +103,14 @@ pub fn load(_pagemap &memory.Pagemap, _res &resource.Resource, base u64) !(Auxva
 		return error('elf: Unsupported ELF file')
 	}
 
+	mut slide := u64(0)
+	if header.@type == elf.et_dyn {
+		slide = 0x400000
+	}
+
 	mut auxval := Auxval{
-		at_entry: base + header.entry
-		at_phdr: 0
+		at_entry: base + header.entry + slide
+		at_phdr:  0
 		at_phent: sizeof(ProgramHdr)
 		at_phnum: header.ph_num
 	}
@@ -116,16 +120,19 @@ pub fn load(_pagemap &memory.Pagemap, _res &resource.Resource, base u64) !(Auxva
 	for i := u64(0); i < header.ph_num; i++ {
 		mut phdr := &ProgramHdr{}
 
-		res.read(0, phdr, header.phoff + (sizeof(ProgramHdr) * i), sizeof(ProgramHdr)) or { return error('') }
+		res.read(0, phdr, header.phoff + (sizeof(ProgramHdr) * i), sizeof(ProgramHdr)) or {
+			return error('')
+		}
 
 		match phdr.p_type {
 			elf.pt_interp {
-				mut p := memory.malloc(phdr.p_filesz + 1)
+				mut p := unsafe { malloc(phdr.p_filesz + 1) }
 				res.read(0, p, phdr.p_offset, phdr.p_filesz) or { return error('') }
 				ld_path = unsafe { cstring_to_vstring(p) }
+				unsafe { free(p) }
 			}
 			elf.pt_phdr {
-				auxval.at_phdr = base + phdr.p_vaddr
+				auxval.at_phdr = base + phdr.p_vaddr + slide
 			}
 			else {}
 		}
@@ -148,10 +155,10 @@ pub fn load(_pagemap &memory.Pagemap, _res &resource.Resource, base u64) !(Auxva
 			0
 		}
 
-		virt := base + phdr.p_vaddr
+		virt := lib.align_down(base + phdr.p_vaddr + slide, page_size)
 		phys := u64(addr)
 
-		mmap.map_range(pagemap, virt, phys, page_count * page_size, pf, mmap.map_anonymous) or {
+		mmap.map_range(mut pagemap, virt, phys, page_count * page_size, pf, mmap.map_anonymous) or {
 			return error('')
 		}
 

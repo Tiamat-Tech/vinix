@@ -1,13 +1,15 @@
+#! /bin/sh
+
 name=gettext
-version=0.22.4
+version=0.23.1
 revision=1
 tarball_url="https://ftp.gnu.org/gnu/gettext/gettext-${version}.tar.xz"
-tarball_blake2b="3f93aa5aef8e40d2e01acaa5aeed11efefd0de43ea26d084a0b9e743019685f7584d8e1bf05c1fd5772a5576d21ee1f052b81366f52c7827b6d14bd4d9890edc"
+tarball_blake2b="08d10340f3d855a87a96594c6f2dcf72925394f02e86235090f8d272e0a27ce32e57a0fbaed61aaf61d7328ff30be076dccaecaa13832d8db3ec0a51786780b9"
 source_hostdeps="automake autoconf libtool pkg-config"
 hostdeps="gcc autoconf automake libtool pkg-config"
 deps="core-libs"
 
-regenerate() {
+prepare() {
     ( cd gettext-runtime/libasprintf && autoreconf -fvi )
     ( cd gettext-runtime/intl && autoreconf -fvi )
     ( cd gettext-runtime && autoreconf -fvi )
@@ -16,7 +18,7 @@ regenerate() {
     autoreconf -fvi
 }
 
-build() {
+configure() {
     cp -rp ${source_dir}/. ./
 
         ACLOCAL=true \
@@ -25,7 +27,9 @@ build() {
         AUTOHEADER=true \
         configure_script_path=./configure \
     autotools_configure
+}
 
+build() {
     make -j${parallelism}
 }
 

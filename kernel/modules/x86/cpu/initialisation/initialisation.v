@@ -60,8 +60,8 @@ pub fn initialise(smp_info &limine.LimineSMPInfo) {
 	pat_msr |= u64(0x0105) << 32
 	msr.wrmsr(0x277, pat_msr)
 
-	cpu.set_gs_base(voidptr(&cpu_local.cpu_number))
-	cpu.set_kernel_gs_base(voidptr(&cpu_local.cpu_number))
+	cpu.set_gs_base(u64(&cpu_local.cpu_number))
+	cpu.set_kernel_gs_base(u64(&cpu_local.cpu_number))
 
 	// Enable SSE/SSE2
 	mut cr0 := cpu.read_cr0()
@@ -134,12 +134,12 @@ pub fn initialise(smp_info &limine.LimineSMPInfo) {
 
 	apic.lapic_timer_calibrate(mut cpu_local)
 
-	print('smp: CPU $cpu_local.cpu_number online!\n')
+	print('smp: CPU ${cpu_local.cpu_number} online!\n')
 
-	katomic.inc(cpu_local.online)
+	katomic.inc(mut &cpu_local.online)
 
 	if cpu_number != 0 {
-		for katomic.load(scheduler_vector) == 0 {}
+		for katomic.load(&scheduler_vector) == 0 {}
 		sched.await()
 	}
 }

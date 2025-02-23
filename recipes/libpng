@@ -1,19 +1,23 @@
+#! /bin/sh
+
 name=libpng
-version=1.6.41
+version=1.6.46
 revision=1
 tarball_url="https://download.sourceforge.net/libpng/libpng-${version}.tar.xz"
-tarball_blake2b="43d8d1c563d9df46b663f706dca9563e31e6e47a2809a77a5d059de8cfa348721054df724d08ac24ef4717ffc101989941127df2d026c9537532375d9b432b68"
+tarball_blake2b="0cc4e4ca0a9394e1ee2778065ef03859854062103609c9356709a9540b8953a6198b5c44a5a05ae97d8f0e6035a171ab1797627f6523805cedf3f985960752c3"
 source_hostdeps="automake autoconf libtool pkg-config"
 hostdeps="gcc autoconf automake libtool pkg-config"
 deps="core-libs zlib"
 
-regenerate() {
+prepare() {
     autotools_recursive_regen
 }
 
-build() {
+configure() {
     autotools_configure
+}
 
+build() {
     make -j${parallelism}
 }
 

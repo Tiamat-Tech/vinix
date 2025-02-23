@@ -44,14 +44,18 @@ fn use_xsdt() bool {
 	return rsdp.revision >= 2 && rsdp.xsdt_addr != 0
 }
 
+@[_linker_section: '.requests']
 @[cinit]
 __global (
 	volatile rsdp_req = limine.LimineRSDPRequest{
-		response: 0
+		response: unsafe { nil }
 	}
 )
 
 pub fn initialise() {
+	if rsdp_req.response == unsafe { nil } {
+		panic('acpi: ACPI not supported on this machine.')
+	}
 	rsdp_ptr := rsdp_req.response.address
 
 	if rsdp_ptr == 0 {

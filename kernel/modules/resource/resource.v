@@ -10,40 +10,38 @@ import ioctl
 import errno
 import event.eventstruct
 
-pub const (
-	o_path = 0o10000000
+pub const o_path = 0o10000000
 
-	o_accmode = (0o03 | o_path)
-	o_exec = o_path
-	o_rdonly = 0o00
-	o_rdwr = 0o02
-	o_search = o_path
-	o_wronly = 0o01
-	o_append = 0o2000
-	o_creat = 0o100
-	o_directory = 0o200000
-	o_excl = 0o200
-	o_noctty = 0o400
-	o_nofollow = 0o400000
-	o_trunc = 0o1000
-	o_nonblock = 0o4000
-	o_dsync = 0o10000
-	o_rsync = 0o4010000
-	o_sync = 0o4010000
-	o_cloexec = 0o2000000
+pub const o_accmode = (0o03 | o_path)
+pub const o_exec = o_path
+pub const o_rdonly = 0o00
+pub const o_rdwr = 0o02
+pub const o_search = o_path
+pub const o_wronly = 0o01
+pub const o_append = 0o2000
+pub const o_creat = 0o100
+pub const o_directory = 0o200000
+pub const o_excl = 0o200
+pub const o_noctty = 0o400
+pub const o_nofollow = 0o400000
+pub const o_trunc = 0o1000
+pub const o_nonblock = 0o4000
+pub const o_dsync = 0o10000
+pub const o_rsync = 0o4010000
+pub const o_sync = 0o4010000
+pub const o_cloexec = 0o2000000
 
-	file_creation_flags_mask = o_creat | o_directory | o_excl | o_noctty | o_nofollow | o_trunc
-	file_descriptor_flags_mask = o_cloexec
-	file_status_flags_mask = ~(file_creation_flags_mask | file_descriptor_flags_mask)
-)
+pub const file_creation_flags_mask = o_creat | o_directory | o_excl | o_noctty | o_nofollow | o_trunc
+pub const file_descriptor_flags_mask = o_cloexec
+pub const file_status_flags_mask = ~(file_creation_flags_mask | file_descriptor_flags_mask)
 
 pub interface Resource {
 mut:
-	stat stat.Stat
+	stat     stat.Stat
 	refcount int
-	l klock.Lock
-	event eventstruct.Event
-	status int
+	l        klock.Lock
+	event    eventstruct.Event
+	status   int
 	can_mmap bool
 	grow(handle voidptr, new_size u64) ?
 	read(handle voidptr, buf voidptr, loc u64, count u64) ?i64

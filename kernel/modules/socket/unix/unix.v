@@ -64,7 +64,7 @@ fn (mut this UnixSocket) read(_handle voidptr, buf voidptr, loc u64, _count u64)
 	handle := unsafe { &file.Handle(_handle) }
 
 	// If pipe is empty, block or return if nonblock
-	for katomic.load(this.used) == 0 {
+	for katomic.load(&this.used) == 0 {
 		// Return EOF if the pipe was closed
 		//		if this.refcount <= 1 {
 		//			return 0
@@ -76,9 +76,11 @@ fn (mut this UnixSocket) read(_handle voidptr, buf voidptr, loc u64, _count u64)
 		this.l.release()
 		mut events := [&this.event]
 		event.await(mut events, true) or {
+			unsafe { events.free() }
 			errno.set(errno.eintr)
 			return none
 		}
+		unsafe { events.free() }
 		this.l.acquire()
 	}
 
@@ -105,7 +107,7 @@ fn (mut this UnixSocket) read(_handle voidptr, buf voidptr, loc u64, _count u64)
 
 	unsafe { C.memcpy(buf, &this.data[this.read_ptr], before_wrap) }
 	if after_wrap != 0 {
-		unsafe { C.memcpy(voidptr(u64(buf) + before_wrap), &this.data[0], after_wrap) }
+		unsafe { C.memcpy(voidptr(u64(buf) + before_wrap), this.data, after_wrap) }
 	}
 
 	this.read_ptr = new_ptr_loc
@@ -132,7 +134,7 @@ fn (mut this UnixSocket) write(_handle voidptr, buf voidptr, loc u64, _count u64
 	handle := unsafe { &file.Handle(_handle) }
 
 	// If pipe is full, block or return if nonblock
-	for katomic.load(peer.used) == peer.capacity {
+	for katomic.load(&peer.used) == peer.capacity {
 		if handle.flags & resource.o_nonblock != 0 {
 			errno.set(errno.ewouldblock)
 			return none
@@ -141,9 +143,11 @@ fn (mut this UnixSocket) write(_handle voidptr, buf voidptr, loc u64, _count u64
 		peer.l.release()
 		mut events := [&peer.event]
 		event.await(mut events, true) or {
+			unsafe { events.free() }
 			errno.set(errno.eintr)
 			return none
 		}
+		unsafe { events.free() }
 		peer.l.acquire()
 	}
 
@@ -170,7 +174,7 @@ fn (mut this UnixSocket) write(_handle voidptr, buf voidptr, loc u64, _count u64
 
 	unsafe { C.memcpy(&peer.data[peer.write_ptr], buf, before_wrap) }
 	if after_wrap != 0 {
-		unsafe { C.memcpy(&peer.data[0], voidptr(u64(buf) + before_wrap), after_wrap) }
+		unsafe { C.memcpy(peer.data, voidptr(u64(buf) + before_wrap), after_wrap) }
 	}
 
 	peer.write_ptr = new_ptr_loc
@@ -256,21 +260,23 @@ fn (mut this UnixSocket) accept(_handle voidptr) ?&resource.Resource {
 		this.l.release()
 		mut events := [&this.event]
 		event.await(mut events, true) or {
+			unsafe { events.free() }
 			errno.set(errno.eintr)
 			return none
 		}
+		unsafe { events.free() }
 		this.l.acquire()
 	}
 
 	mut peer := this.backlog.pop()
 
 	mut connection_socket := &UnixSocket{
-		refcount: 1
-		peer: peer
+		refcount:  1
+		peer:      peer
 		connected: true
-		name: peer.name
-		data: unsafe { C.malloc(unix.sock_buf) }
-		capacity: unix.sock_buf
+		name:      peer.name
+		data:      unsafe { C.malloc(unix.sock_buf) }
+		capacity:  unix.sock_buf
 	}
 
 	peer.refcount++
@@ -285,9 +291,11 @@ fn (mut this UnixSocket) accept(_handle voidptr) ?&resource.Resource {
 
 	mut events := [&this.connection_event]
 	event.await(mut events, true) or {
+		unsafe { events.free() }
 		errno.set(errno.eintr)
 		return none
 	}
+	unsafe { events.free() }
 
 	return connection_socket
 }
@@ -337,9 +345,11 @@ fn (mut this UnixSocket) connect(handle voidptr, _addr voidptr, addrlen u32) ? {
 
 	mut events := [&this.connection_event]
 	event.await(mut events, true) or {
+		unsafe { events.free() }
 		errno.set(errno.eintr)
 		return none
 	}
+	unsafe { events.free() }
 
 	event.trigger(mut socket.connection_event, false)
 
@@ -394,7 +404,7 @@ fn (mut this UnixSocket) recvmsg(_handle voidptr, msg &sock_pub.MsgHdr, flags in
 	C.printf(c'%d iovecs, %llu bytes\n', msg.msg_iovlen, count)
 
 	// If pipe is empty, block or return if nonblock
-	for katomic.load(this.used) == 0 {
+	for katomic.load(&this.used) == 0 {
 		// Return EOF if the pipe was closed
 		//		if this.refcount <= 1 {
 		//			return 0
@@ -408,9 +418,11 @@ fn (mut this UnixSocket) recvmsg(_handle voidptr, msg &sock_pub.MsgHdr, flags in
 		this.l.release()
 		mut events := [&this.event]
 		event.await(mut events, true) or {
+			unsafe { events.free() }
 			errno.set(errno.eintr)
 			return none
 		}
+		unsafe { events.free() }
 		this.l.acquire()
 	}
 
@@ -438,7 +450,7 @@ fn (mut this UnixSocket) recvmsg(_handle voidptr, msg &sock_pub.MsgHdr, flags in
 	mut tmpbuf := unsafe { &u8(C.malloc(before_wrap + after_wrap)) }
 	unsafe { C.memcpy(tmpbuf, &this.data[this.read_ptr], before_wrap) }
 	if after_wrap != 0 {
-		unsafe { C.memcpy(voidptr(u64(tmpbuf) + before_wrap), &this.data[0], after_wrap) }
+		unsafe { C.memcpy(voidptr(u64(tmpbuf) + before_wrap), this.data, after_wrap) }
 	}
 
 	mut transferred := u64(0)
@@ -486,8 +498,8 @@ fn (mut this UnixSocket) recvmsg(_handle voidptr, msg &sock_pub.MsgHdr, flags in
 pub fn create(@type int) ?&UnixSocket {
 	mut ret := &UnixSocket{
 		refcount: 1
-		peer: unsafe { nil }
-		data: unsafe { C.malloc(unix.sock_buf) }
+		peer:     unsafe { nil }
+		data:     unsafe { C.malloc(unix.sock_buf) }
 		capacity: unix.sock_buf
 	}
 	ret.name.sun_family = sock_pub.af_unix
@@ -497,15 +509,15 @@ pub fn create(@type int) ?&UnixSocket {
 pub fn create_pair(@type int) ?(&UnixSocket, &UnixSocket) {
 	mut a := &UnixSocket{
 		refcount: 1
-		peer: unsafe { nil }
-		data: unsafe { C.malloc(unix.sock_buf) }
+		peer:     unsafe { nil }
+		data:     unsafe { C.malloc(unix.sock_buf) }
 		capacity: unix.sock_buf
 	}
 	a.name.sun_family = sock_pub.af_unix
 	mut b := &UnixSocket{
 		refcount: 1
-		peer: unsafe { nil }
-		data: unsafe { C.malloc(unix.sock_buf) }
+		peer:     unsafe { nil }
+		data:     unsafe { C.malloc(unix.sock_buf) }
 		capacity: unix.sock_buf
 	}
 	b.name.sun_family = sock_pub.af_unix

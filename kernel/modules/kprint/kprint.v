@@ -8,6 +8,7 @@ import klock
 import dev.serial
 import term
 
+@[markused]
 __global (
 	printf_lock klock.Lock
 	kprint_lock klock.Lock
@@ -29,9 +30,7 @@ pub fn syscall_kprint(_ voidptr, message charptr) {
 	}
 }
 
-pub fn kwrite(message charptr) {
-	msglen := unsafe { u64(C.strlen(message)) }
-
+pub fn kwrite(message charptr, msglen u64) {
 	kprint_lock.acquire()
 
 	$if !prod {

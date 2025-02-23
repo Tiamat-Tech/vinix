@@ -1,55 +1,58 @@
 # GNUmakefile: Makefile of the kernel.
 # Code is governed by the GPL-2.0 license.
-# Copyright (C) 2021-2022 The Vinix authors.
+# Copyright (C) 2021-2024 The Vinix authors.
 
 # Nuke built-in rules and variables.
-override MAKEFLAGS += -rR
+MAKEFLAGS += -rR
+.SUFFIXES:
 
-override KERNEL := vinix
+# This is the name that our final executable will have.
+# Change as needed.
+override OUTPUT := vinix
 
-define DEFAULT_VAR =
-    ifeq ($(origin $1), default)
-        override $(1) := $(2)
+# Install prefix; /usr/local is a good, standard default pick.
+PREFIX := /usr/local
+
+# User controllable C compiler command.
+CC := cc
+
+# User controllable archiver command.
+AR := ar
+
+# User controllable V command.
+V := v
+
+# User controllable C flags.
+CFLAGS := -g -O2 -pipe
+
+# User controllable C preprocessor flags. We set none by default.
+CPPFLAGS :=
+
+# User controllable V flags. We set none by default.
+VFLAGS :=
+
+# User controllable linker flags. We set none by default.
+LDFLAGS :=
+
+PROD :=
+
+# Ensure the dependencies have been obtained.
+ifneq ($(shell ( test '$(MAKECMDGOALS)' = clean || test '$(MAKECMDGOALS)' = distclean ); echo $$?),0)
+    ifeq ($(shell ( ! test -d freestnd-c-hdrs || ! test -d cc-runtime || ! test -d c/flanterm || ! test -f c/printf/printf.c || ! test -f c/printf/printf.h ); echo $$?),0)
+        $(error Please run the ./get-deps script first)
     endif
-    ifeq ($(origin $1), undefined)
-        override $(1) := $(2)
-    endif
-endef
-
-override DEFAULT_TOOLCHAIN_PREFIX :=
-$(eval $(call DEFAULT_VAR,TOOLCHAIN_PREFIX,$(DEFAULT_TOOLCHAIN_PREFIX)))
-
-override DEFAULT_CC := $(TOOLCHAIN_PREFIX)cc
-$(eval $(call DEFAULT_VAR,CC,$(DEFAULT_CC)))
-
-override DEFAULT_LD := $(TOOLCHAIN_PREFIX)ld
-$(eval $(call DEFAULT_VAR,LD,$(DEFAULT_LD)))
-
-override DEFAULT_OBJDUMP := $(TOOLCHAIN_PREFIX)objdump
-$(eval $(call DEFAULT_VAR,OBJDUMP,$(DEFAULT_OBJDUMP)))
-
-override DEFAULT_V := v
-$(eval $(call DEFAULT_VAR,V,$(DEFAULT_V)))
-
-override DEFAULT_CFLAGS := -g -O2 -pipe
-$(eval $(call DEFAULT_VAR,CFLAGS,$(DEFAULT_CFLAGS)))
-
-override DEFAULT_CPPFLAGS :=
-$(eval $(call DEFAULT_VAR,CPPFLAGS,$(DEFAULT_CPPFLAGS)))
-
-override DEFAULT_VFLAGS :=
-$(eval $(call DEFAULT_VAR,VFLAGS,$(DEFAULT_VFLAGS)))
-
-override DEFAULT_LDFLAGS :=
-$(eval $(call DEFAULT_VAR,LDFLAGS,$(DEFAULT_LDFLAGS)))
-
-VINIX_PROD ?=
-ifeq ($(VINIX_PROD),no)
-    override PROD := false
-else
-    override PROD := true
 endif
 
+# Check if CC is Clang.
+override CC_IS_CLANG := $(shell ! $(CC) --version 2>/dev/null | grep 'clang' >/dev/null 2>&1; echo $$?)
+
+# If the C compiler is Clang, set the target as needed.
+ifeq ($(CC_IS_CLANG),1)
+    override CC += \
+        -target x86_64-unknown-none
+endif
+
+# Internal C flags that should not be changed by the user.
 override CFLAGS += \
     -g \
     -Wall \
@@ -62,7 +65,6 @@ override CFLAGS += \
     -fno-stack-check \
     -fno-lto \
     -fno-PIC \
-    -fno-PIE \
     -ffunction-sections \
     -fdata-sections \
     -fno-strict-aliasing \
@@ -75,80 +77,113 @@ override CFLAGS += \
     -mno-red-zone \
     -mcmodel=kernel
 
+# Internal C preprocessor flags that should not be changed by the user.
 override CPPFLAGS := \
     -I c \
-    -isystem c/freestanding-headers \
+    -isystem freestnd-c-hdrs \
     $(CPPFLAGS) \
     -MMD \
     -MP
 
-obj/c/printf/printf.c.o: override CPPFLAGS += \
+obj/printf/printf.c.o: override CPPFLAGS += \
     -DPRINTF_SUPPORT_DECIMAL_SPECIFIERS=0 \
     -DPRINTF_SUPPORT_EXPONENTIAL_SPECIFIERS=0
 
+obj/flanterm/backends/fb.c.o: override CPPFLAGS += \
+    -DFLANTERM_FB_DISABLE_BUMP_ALLOC
+
+# Internal linker flags that should not be changed by the user.
 override LDFLAGS += \
-    -m elf_x86_64 \
+    -Wl,-m,elf_x86_64 \
+    -Wl,--build-id=none \
     -nostdlib \
     -static \
-    -zmax-page-size=0x1000 \
-    -Tlinker.ld \
-    -gc-sections
+    -z max-page-size=0x1000 \
+    -Wl,--gc-sections \
+    -T linker.ld
 
 override VFLAGS += \
     -os vinix \
     -enable-globals \
     -nofloat \
-    -autofree \
+    -manualfree \
+    -experimental \
+    -message-limit 10000 \
     -gc none \
     -d no_backtrace
 
-ifeq ($(PROD),true)
-	override VFLAGS += -prod
-	override CPPFLAGS += -DPROD
+ifeq ($(PROD),false)
+    override VFLAGS += -warn-about-allocs
+else
+    override VFLAGS += -prod
+    override CPPFLAGS += -DPROD
 endif
 
-override VFILES := $(shell find -L * -type f -name '*.v')
-override CFILES := $(shell find -L c/* -type f -name '*.c')
-override ASFILES := $(shell find -L asm/* -type f -name '*.S')
+# Use "find" to glob all *.v, *.c, and *.S files in the tree and obtain the
+# object and header dependency file names.
+override VFILES := $(shell find -L * -type f -name '*.v' | LC_ALL=C sort)
+override CFILES := $(shell cd c && find -L * -type f -name '*.c' | LC_ALL=C sort)
+override ASFILES := $(shell cd asm && find -L * -type f -name '*.S' | LC_ALL=C sort)
 override OBJ := $(addprefix obj/,$(CFILES:.c=.c.o) $(ASFILES:.S=.S.o))
 override HEADER_DEPS := $(addprefix obj/,$(CFILES:.c=.c.d) $(ASFILES:.S=.S.d))
 
+# Default target. This must come first, before header dependencies.
 .PHONY: all
-all: bin/$(KERNEL)
+all: bin/$(OUTPUT)
 
-bin/$(KERNEL): GNUmakefile linker.ld obj/blob.c.o $(OBJ)
+# Include header dependencies.
+-include obj/blob.c.d $(HEADER_DEPS)
+
+# Link rules for building the C compiler runtime.
+cc-runtime-x86_64/cc-runtime.a: GNUmakefile cc-runtime/*
+	rm -rf cc-runtime-x86_64
+	cp -r cc-runtime cc-runtime-x86_64
+	$(MAKE) -C cc-runtime-x86_64 -f cc-runtime.mk \
+		CC="$(CC)" \
+		AR="$(AR)" \
+		CFLAGS="$(CFLAGS)" \
+		CPPFLAGS='-isystem ../freestnd-c-hdrs -DCC_RUNTIME_NO_FLOAT'
+
+# Link rules for the final executable.
+bin/$(OUTPUT): GNUmakefile linker.ld obj/blob.c.o $(OBJ) cc-runtime-x86_64/cc-runtime.a
 	mkdir -p "$$(dirname $@)"
-	$(LD) obj/blob.c.o $(OBJ) $(LDFLAGS) -o $@
-	mv c/symbol_table.c symbol_table.c.tmp
-	./gensyms.sh $(OBJDUMP) $@ > c/symbol_table.c
-	$(CC) $(CFLAGS) $(CPPFLAGS) -c c/symbol_table.c -o obj/c/symbol_table.c.o
-	$(LD) obj/blob.c.o $(OBJ) $(LDFLAGS) -o $@
-	mv symbol_table.c.tmp c/symbol_table.c
+	$(CC) $(CFLAGS) $(LDFLAGS) obj/blob.c.o $(OBJ) cc-runtime-x86_64/cc-runtime.a -o $@
 
-obj/blob.c.o: $(VFILES)
+obj/blob.c.o: GNUmakefile $(VFILES)
 	mkdir -p "$$(dirname $@)"
 	$(V) $(VFLAGS) -o obj/blob.c .
+	sed 's/call 0(/call *(/g' < obj/blob.c > obj/blob.c.tmp
+	mv obj/blob.c.tmp obj/blob.c
 	$(CC) $(CFLAGS) $(CPPFLAGS) -w -c obj/blob.c -o $@
 
--include $(HEADER_DEPS)
-
-obj/%.c.o: %.c GNUmakefile
+# Compilation rules for *.c files.
+obj/%.c.o: c/%.c GNUmakefile
 	mkdir -p "$$(dirname $@)"
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
-obj/%.S.o: %.S GNUmakefile
+# Compilation rules for *.S files.
+obj/%.S.o: asm/%.S GNUmakefile
 	mkdir -p "$$(dirname $@)"
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
+# Remove object files and the final executable.
 .PHONY: clean
 clean:
-	rm -rf bin obj
+	rm -rf bin obj cc-runtime-x86_64
 
+# Remove everything built and generated including downloaded dependencies.
 .PHONY: distclean
 distclean: clean
-	rm -rf c/freestanding-headers c/flanterm c/printf
+	rm -rf freestnd-c-hdrs cc-runtime c/flanterm c/printf
 
+# Install the final built executable to its final on-root location.
 .PHONY: install
-install:
-	install -d "$(DESTDIR)$(PREFIX)/share/vinix"
-	install -m 644 bin/$(KERNEL) "$(DESTDIR)$(PREFIX)/share/vinix/"
+install: all
+	install -d "$(DESTDIR)$(PREFIX)/share/$(OUTPUT)"
+	install -m 644 bin/$(OUTPUT) "$(DESTDIR)$(PREFIX)/share/$(OUTPUT)/"
+
+# Try to undo whatever the "install" target did.
+.PHONY: uninstall
+uninstall:
+	rm -f "$(DESTDIR)$(PREFIX)/share/$(OUTPUT)/$(OUTPUT)"
+	-rmdir "$(DESTDIR)$(PREFIX)/share/$(OUTPUT)"

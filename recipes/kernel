@@ -1,3 +1,5 @@
+#! /bin/sh
+
 name=kernel
 version=0.0
 revision=1
@@ -5,15 +7,21 @@ source_dir="kernel"
 source_imagedeps="git"
 source_allow_network="yes"
 hostdeps="gcc v"
+deps="core-libs"
 
-regenerate() {
+prepare() {
     ./get-deps
 }
 
 build() {
     cp -rpf "${source_dir}"/. ./
 
-    make -j${parallelism} TOOLCHAIN_PREFIX=${OS_TRIPLET}-
+    make -j${parallelism} \
+        PROD="$PROD" \
+        CC=${OS_TRIPLET}-gcc \
+        LD=${OS_TRIPLET}-ld \
+        AR=${OS_TRIPLET}-ar \
+        OBJDUMP=${OS_TRIPLET}-objdump
 }
 
 package() {

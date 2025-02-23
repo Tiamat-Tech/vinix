@@ -109,7 +109,7 @@ pub fn await(mut events []&eventstruct.Event, block bool) ?u64 {
 		return none
 	}
 
-	katomic.inc(waiting_event_count)
+	katomic.inc(mut &waiting_event_count)
 
 	attach_listeners(mut events, mut t)
 	defer {
@@ -130,7 +130,7 @@ pub fn await(mut events []&eventstruct.Event, block bool) ?u64 {
 
 	sched.yield(true)
 
-	katomic.dec(waiting_event_count)
+	katomic.dec(mut &waiting_event_count)
 
 	if t.enqueued_by_signal {
 		return none
@@ -191,8 +191,8 @@ pub fn pthread_exit(ret voidptr) {
 
 	sched.dequeue_thread(current_thread)
 
-	cpu.set_gs_base(voidptr(&cpu_local.cpu_number))
-	cpu.set_kernel_gs_base(voidptr(current_thread))
+	cpu.set_gs_base(u64(&cpu_local.cpu_number))
+	cpu.set_kernel_gs_base(u64(current_thread))
 
 	current_thread.exit_value = ret
 	trigger(mut current_thread.exited, false)
@@ -204,6 +204,9 @@ pub fn pthread_wait(t &proc.Thread) voidptr {
 	mut events := [&t.exited]
 	await(mut events, true) or {}
 	exit_value := t.exit_value
-	unsafe { free(t) }
+	unsafe {
+		free(t)
+		events.free()
+	}
 	return exit_value
 }

@@ -1,3 +1,4 @@
 . ${base_dir}/jinx-config
-export VINIX_PROD=no
-export CFLAGS="$CFLAGS -g"
+
+PROD=false
+TARGET_CFLAGS="$TARGET_CFLAGS -g"

@@ -1,19 +1,23 @@
+#! /bin/sh
+
 name=libexpat
-version=2.5.0
+version=2.6.4
 revision=1
-tarball_url="https://github.com/libexpat/libexpat/releases/download/R_2_5_0/expat-${version}.tar.xz"
-tarball_blake2b="670298d076ff3b512a0212170d40cb04c601a11d6b152f215a5302ad3238c69c2386393d7a6c70bc284be35ce97bf27d87115c3391f4bc17406e509d739d3e31"
+tarball_url="https://github.com/libexpat/libexpat/releases/download/R_2_6_4/expat-${version}.tar.xz"
+tarball_blake2b="70d716722358db8d0acb2c74dbbc9d2362d04a0b856eab6b6d723614b656cf6aad9f6646339e0a32b4151db2e9541439bcb81ec87791e5e6ec0bd36a3ca067cc"
 source_hostdeps="automake autoconf libtool pkg-config"
 hostdeps="gcc autoconf automake libtool pkg-config"
 deps="core-libs"
 
-regenerate() {
+prepare() {
     autotools_recursive_regen
 }
 
-build() {
+configure() {
     autotools_configure
+}
 
+build() {
     make -j${parallelism}
 }
 

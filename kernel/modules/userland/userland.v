@@ -200,7 +200,7 @@ pub fn syscall_sigreturn(_ voidptr, context &cpulocal.GPRState, old_mask u64) {
 		cli
 	}
 
-	t.gpr_state = unsafe { context[0] }
+	t.gpr_state = *context
 	t.masked_signals = old_mask
 
 	sched.yield(false)
@@ -212,8 +212,8 @@ pub fn syscall_sigaction(_ voidptr, signum int, act &proc.SigAction, oldact &pro
 	mut current_thread := proc.current_thread()
 	mut process := current_thread.process
 
-	C.printf(c'\n\e[32m%s\e[m: sigaction(%d, 0x%llx, 0x%llx)\n', process.name.str, signum, voidptr(act),
-		voidptr(oldact))
+	C.printf(c'\n\e[32m%s\e[m: sigaction(%d, 0x%llx, 0x%llx)\n', process.name.str, signum,
+		voidptr(act), voidptr(oldact))
 	defer {
 		C.printf(c'\e[32m%s\e[m: returning\n', process.name.str)
 	}
@@ -224,16 +224,14 @@ pub fn syscall_sigaction(_ voidptr, signum int, act &proc.SigAction, oldact &pro
 
 	mut t := proc.current_thread()
 
-	if voidptr(oldact) != voidptr(0) {
+	if oldact != unsafe { nil } {
 		unsafe {
-			oldact[0] = t.sigactions[signum]
+			*oldact = t.sigactions[signum]
 		}
 	}
 
-	if voidptr(act) != voidptr(0) {
-		unsafe {
-			t.sigactions[signum] = act[0]
-		}
+	if act != unsafe { nil } {
+		t.sigactions[signum] = *act
 	}
 
 	return 0, 0
@@ -243,30 +241,30 @@ pub fn syscall_sigprocmask(_ voidptr, how int, set &u64, oldset &u64) (u64, u64)
 	mut current_thread := proc.current_thread()
 	mut process := current_thread.process
 
-	C.printf(c'\n\e[32m%s\e[m: sigprocmask(%d, 0x%llx, 0x%llx)\n', process.name.str, how, voidptr(set),
-		voidptr(oldset))
+	C.printf(c'\n\e[32m%s\e[m: sigprocmask(%d, 0x%llx, 0x%llx)\n', process.name.str, how,
+		voidptr(set), voidptr(oldset))
 	defer {
 		C.printf(c'\e[32m%s\e[m: returning\n', process.name.str)
 	}
 
 	mut t := proc.current_thread()
 
-	if voidptr(oldset) != voidptr(0) {
+	if oldset != unsafe { nil } {
 		unsafe {
-			oldset[0] = t.masked_signals
+			*oldset = t.masked_signals
 		}
 	}
 
-	if voidptr(set) != voidptr(0) {
+	if set != unsafe { nil } {
 		match how {
 			userland.sig_block {
-				t.masked_signals |= unsafe { set[0] }
+				t.masked_signals |= *set
 			}
 			userland.sig_unblock {
-				t.masked_signals &= ~(unsafe { set[0] })
+				t.masked_signals &= ~*set
 			}
 			userland.sig_setmask {
-				t.masked_signals = unsafe { set[0] }
+				t.masked_signals = *set
 			}
 			else {}
 		}
@@ -290,7 +288,7 @@ pub fn dispatch_a_signal(context &cpulocal.GPRState) {
 		if t.masked_signals & (u64(1) << i) != 0 {
 			continue
 		}
-		if katomic.btr(t.pending_signals, i) == true {
+		if katomic.btr(mut &t.pending_signals, i) == true {
 			which = i
 			break
 		}
@@ -319,9 +317,9 @@ pub fn dispatch_a_signal(context &cpulocal.GPRState) {
 	mut return_context := &cpulocal.GPRState(t.gpr_state.rsp)
 
 	unsafe {
-		return_context[0] = context[0]
-		t.gpr_state = context[0]
+		*return_context = *context
 	}
+	t.gpr_state = *context
 	// Siginfo
 	t.gpr_state.rsp -= sizeof(SigInfo)
 	t.gpr_state.rsp = lib.align_down(t.gpr_state.rsp, 16)
@@ -338,7 +336,7 @@ pub fn dispatch_a_signal(context &cpulocal.GPRState) {
 
 	t.gpr_state.rdi = u64(which)
 	t.gpr_state.rsi = u64(siginfo)
-	t.gpr_state.rdx = sigaction.sa_sigaction
+	t.gpr_state.rdx = u64(sigaction.sa_sigaction)
 	t.gpr_state.rcx = u64(return_context)
 	t.gpr_state.r8 = previous_mask
 
@@ -348,7 +346,7 @@ pub fn dispatch_a_signal(context &cpulocal.GPRState) {
 pub fn sendsig(_thread &proc.Thread, signal u8) {
 	mut t := unsafe { _thread }
 
-	katomic.bts(t.pending_signals, signal)
+	katomic.bts(mut &t.pending_signals, signal)
 
 	// Try to stop an event_await()
 	sched.enqueue_thread(t, true)
@@ -385,7 +383,7 @@ pub fn syscall_execve(_ voidptr, _path charptr, _argv &charptr, _envp &charptr) 
 	mut argv := []string{}
 	for i := 0; true; i++ {
 		unsafe {
-			if voidptr(_argv[i]) == voidptr(0) {
+			if _argv[i] == nil {
 				break
 			}
 			argv << cstring_to_vstring(_argv[i])
@@ -394,7 +392,7 @@ pub fn syscall_execve(_ voidptr, _path charptr, _argv &charptr, _envp &charptr) 
 	mut envp := []string{}
 	for i := 0; true; i++ {
 		unsafe {
-			if voidptr(_envp[i]) == voidptr(0) {
+			if _envp[i] == nil {
 				break
 			}
 			envp << cstring_to_vstring(_envp[i])
@@ -411,7 +409,8 @@ pub fn syscall_waitpid(_ voidptr, pid int, _status &int, options int) (u64, u64)
 	mut current_thread := proc.current_thread()
 	mut current_process := current_thread.process
 
-	C.printf(c'\n\e[32m%s\e[m: waitpid(%d, 0x%llx, %d)\n', current_process.name.str, pid, _status, options)
+	C.printf(c'\n\e[32m%s\e[m: waitpid(%d, 0x%llx, %d)\n', current_process.name.str, pid,
+		_status, options)
 	defer {
 		C.printf(c'\e[32m%s\e[m: returning\n', current_process.name.str)
 	}
@@ -419,6 +418,9 @@ pub fn syscall_waitpid(_ voidptr, pid int, _status &int, options int) (u64, u64)
 	mut status := unsafe { _status }
 
 	mut events := []&eventstruct.Event{}
+	defer {
+		unsafe { events.free() }
+	}
 	mut child := &proc.Process(unsafe { nil })
 
 	if pid == -1 {
@@ -436,7 +438,7 @@ pub fn syscall_waitpid(_ voidptr, pid int, _status &int, options int) (u64, u64)
 			return errno.err, errno.echild
 		}
 		child = processes[pid]
-		if voidptr(child) == voidptr(0) || child.ppid != current_process.pid {
+		if child == unsafe { nil } || child.ppid != current_process.pid {
 			return errno.err, errno.echild
 		}
 		events << &child.event
@@ -445,12 +447,12 @@ pub fn syscall_waitpid(_ voidptr, pid int, _status &int, options int) (u64, u64)
 	block := options & userland.wnohang == 0
 	which := event.await(mut events, block) or { return errno.err, errno.eintr }
 
-	if voidptr(child) == voidptr(0) {
+	if child == unsafe { nil } {
 		child = current_process.children[which]
 	}
 
 	unsafe {
-		status[0] = child.status
+		*status = child.status
 	}
 	ret := child.pid
 
@@ -478,11 +480,11 @@ pub fn syscall_exit(_ voidptr, status int) {
 
 	// Close all FDs
 	for i := 0; i < proc.max_fds; i++ {
-		if current_process.fds[i] == voidptr(0) {
+		if current_process.fds[i] == unsafe { nil } {
 			continue
 		}
 
-		file.fdnum_close(current_process, i) or {}
+		file.fdnum_close(current_process, i, true) or {}
 	}
 
 	// PID 1 inherits children
@@ -494,8 +496,8 @@ pub fn syscall_exit(_ voidptr, status int) {
 
 	mmap.delete_pagemap(mut old_pagemap) or {}
 
-	katomic.store(current_process.status, status << 8)
-	event.trigger(mut current_process.event, false)
+	katomic.store(mut &current_process.status, int(u32(status) << 8))
+	event.trigger(mut &current_process.event, false)
 
 	sched.dequeue_and_die()
 }
@@ -512,13 +514,15 @@ pub fn syscall_fork(gpr_state &cpulocal.GPRState) (u64, u64) {
 	old_thread := proc.current_thread()
 	mut old_process := old_thread.process
 
-	mut new_process := sched.new_process(old_process, voidptr(0)) or { return errno.err, errno.get() }
+	mut new_process := sched.new_process(old_process, unsafe { nil }) or {
+		return errno.err, errno.get()
+	}
 
 	new_process.name = '${old_process.name}[${new_process.pid}]'
 
 	// Dup all FDs
 	for i := 0; i < proc.max_fds; i++ {
-		if old_process.fds[i] == voidptr(0) {
+		if old_process.fds[i] == unsafe { nil } {
 			continue
 		}
 
@@ -538,21 +542,23 @@ pub fn syscall_fork(gpr_state &cpulocal.GPRState) (u64, u64) {
 	pf_stack := u64(pf_stack_phys) + stack_size + higher_half
 
 	mut new_thread := &proc.Thread{
-		gpr_state: gpr_state
-		process: new_process
-		timeslice: old_thread.timeslice
-		gs_base: cpu.get_kernel_gs_base()
-		fs_base: cpu.get_fs_base()
-		kernel_stack: kernel_stack
-		pf_stack: pf_stack
-		running_on: u64(-1)
-		cr3: u64(new_process.pagemap.top_level)
-		sigentry: old_thread.sigentry
-		sigactions: old_thread.sigactions
+		gpr_state:      gpr_state
+		process:        new_process
+		timeslice:      old_thread.timeslice
+		gs_base:        cpu.get_kernel_gs_base()
+		fs_base:        cpu.get_fs_base()
+		kernel_stack:   kernel_stack
+		pf_stack:       pf_stack
+		running_on:     u64(-1)
+		cr3:            u64(new_process.pagemap.top_level)
+		sigentry:       old_thread.sigentry
+		sigactions:     old_thread.sigactions
 		masked_signals: old_thread.masked_signals
-		stacks: stacks
-		fpu_storage: unsafe { C.malloc(fpu_storage_size) }
+		stacks:         stacks
+		fpu_storage:    unsafe { malloc(fpu_storage_size) }
 	}
+
+	unsafe { stacks.free() }
 
 	new_thread.self = voidptr(new_thread)
 
@@ -570,16 +576,16 @@ pub fn syscall_fork(gpr_state &cpulocal.GPRState) (u64, u64) {
 }
 
 pub fn start_program(execve bool, dir &fs.VFSNode, path string, argv []string, envp []string, stdin string, stdout string, stderr string) ?&proc.Process {
-	prog_node := fs.get_node(dir, path, true) ?
+	prog_node := fs.get_node(dir, path, true)?
 	mut prog := prog_node.resource
 
 	mut new_pagemap := memory.new_pagemap()
 
 	// Check for shebang before proceeding as if it was an ELF.
 	mut shebang := [2]char{}
-	prog.read(0, &shebang[0], 0, 2) ?
+	prog.read(0, &shebang[0], 0, 2)?
 	if shebang[0] == char(`#`) && shebang[1] == char(`!`) {
-		real_path, arg := parse_shebang(mut prog) ?
+		real_path, arg := parse_shebang(mut prog)?
 		mut final_argv := [real_path]
 		if arg != '' {
 			final_argv << arg
@@ -593,28 +599,34 @@ pub fn start_program(execve bool, dir &fs.VFSNode, path string, argv []string, e
 
 	auxval, ld_path := elf.load(new_pagemap, prog, 0) or { return none }
 
-	mut entry_point := voidptr(0)
+	mut entry_point := unsafe { nil }
 
 	if ld_path == '' {
 		entry_point = voidptr(auxval.at_entry)
 	} else {
-		ld_node := fs.get_node(vfs_root, ld_path, true) ?
+		ld_node := fs.get_node(vfs_root, ld_path, true)?
 		ld := ld_node.resource
 
-		ld_auxval, _ := elf.load(new_pagemap, ld, 0x40000000) or { return none }
+		ld_auxval, interp := elf.load(new_pagemap, ld, 0x40000000) or { return none }
+
+		if interp != '' {
+			unsafe { interp.free() }
+		}
 
 		entry_point = voidptr(ld_auxval.at_entry)
+
+		unsafe { ld_path.free() }
 	}
 
 	if execve == false {
-		mut new_process := sched.new_process(voidptr(0), new_pagemap) ?
+		mut new_process := sched.new_process(unsafe { nil }, new_pagemap)?
 
 		new_process.name = '${path}[${new_process.pid}]'
 
-		stdin_node := fs.get_node(vfs_root, stdin, true) ?
+		stdin_node := fs.get_node(vfs_root, stdin, true)?
 		stdin_handle := &file.Handle{
 			resource: stdin_node.resource
-			node: stdin_node
+			node:     stdin_node
 			refcount: 1
 		}
 		stdin_fd := &file.FD{
@@ -622,10 +634,10 @@ pub fn start_program(execve bool, dir &fs.VFSNode, path string, argv []string, e
 		}
 		new_process.fds[0] = voidptr(stdin_fd)
 
-		stdout_node := fs.get_node(vfs_root, stdout, true) ?
+		stdout_node := fs.get_node(vfs_root, stdout, true)?
 		stdout_handle := &file.Handle{
 			resource: stdout_node.resource
-			node: stdout_node
+			node:     stdout_node
 			refcount: 1
 		}
 		stdout_fd := &file.FD{
@@ -633,10 +645,10 @@ pub fn start_program(execve bool, dir &fs.VFSNode, path string, argv []string, e
 		}
 		new_process.fds[1] = voidptr(stdout_fd)
 
-		stderr_node := fs.get_node(vfs_root, stderr, true) ?
+		stderr_node := fs.get_node(vfs_root, stderr, true)?
 		stderr_handle := &file.Handle{
 			resource: stderr_node.resource
-			node: stderr_node
+			node:     stderr_node
 			refcount: 1
 		}
 		stderr_fd := &file.FD{
@@ -644,8 +656,8 @@ pub fn start_program(execve bool, dir &fs.VFSNode, path string, argv []string, e
 		}
 		new_process.fds[2] = voidptr(stderr_fd)
 
-		sched.new_user_thread(new_process, true, entry_point, voidptr(0), 0, argv, envp,
-			auxval, true) ?
+		sched.new_user_thread(new_process, true, entry_point, unsafe { nil }, 0, argv,
+			envp, auxval, true)?
 
 		return new_process
 	} else {
@@ -661,7 +673,7 @@ pub fn start_program(execve bool, dir &fs.VFSNode, path string, argv []string, e
 		kernel_pagemap.switch_to()
 		t.process = kernel_process
 
-		mmap.delete_pagemap(mut old_pagemap) ?
+		mmap.delete_pagemap(mut old_pagemap)?
 
 		process.thread_stack_top = u64(0x70000000000)
 		process.mmap_anon_non_fixed_base = u64(0x80000000000)
@@ -670,8 +682,8 @@ pub fn start_program(execve bool, dir &fs.VFSNode, path string, argv []string, e
 		// old_threads := process.threads
 		process.threads = []&proc.Thread{}
 
-		sched.new_user_thread(process, true, entry_point, voidptr(0), 0, argv, envp, auxval,
-			true) ?
+		sched.new_user_thread(process, true, entry_point, unsafe { nil }, 0, argv, envp,
+			auxval, true)?
 
 		unsafe {
 			for s in argv {
@@ -696,13 +708,13 @@ pub fn parse_shebang(mut res resource.Resource) ?(string, string) {
 	mut build_arg := strings.new_builder(512)
 
 	mut c := char(0)
-	res.read(0, &c, index, 1) ?
+	res.read(0, &c, index, 1)?
 	if c == char(` `) {
 		index++
 	}
 
 	for {
-		res.read(0, &c, index, 1) ?
+		res.read(0, &c, index, 1)?
 		index++
 		if c == char(` `) {
 			break
@@ -716,7 +728,7 @@ pub fn parse_shebang(mut res resource.Resource) ?(string, string) {
 	}
 
 	for {
-		res.read(0, &c, index, 1) ?
+		res.read(0, &c, index, 1)?
 		index++
 		if c == char(` `) || c == char(`\n`) {
 			break

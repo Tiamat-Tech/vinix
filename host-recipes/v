@@ -1,11 +1,15 @@
+#! /bin/sh
+
 name=v
 from_source=v
 revision=1
-imagedeps="gcc"
+imagedeps="build-essential"
 
 build() {
     cp -r ${source_dir}/. ./
-    cc -O2 -pipe -w -std=gnu99 -fno-strict-aliasing v.c -o v -lm -lpthread
+    set -x
+    cc $HOST_CFLAGS $HOST_CPPFLAGS -w -std=gnu99 $HOST_LDFLAGS v.c -lm -lpthread -o v
+    set +x
 }
 
 package() {
