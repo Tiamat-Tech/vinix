@@ -5,8 +5,9 @@
 module syscall
 
 import x86.cpu.local as cpulocal
-import userland
+//import userland
 
+@[markused]
 fn leave(context &cpulocal.GPRState) {
 	asm volatile amd64 {
 		cli
@@ -79,7 +80,7 @@ fn syscall_entry() {
 		pop r15 // Restore user stack
 		mov rsp, gs:[32]
 		swapgs
-		rex.w sysret
+		sysretq
 		; ; ; memory
 	}
 }

@@ -11,17 +11,15 @@ import proc
 import file
 import errno
 
-pub const (
-	at_fdcwd            = -100
-	at_empty_path       = 0x1000
-	at_symlink_follow   = 0x400
-	at_symlink_nofollow = 0x100
-	at_removedir        = 0x200
-	at_eaccess          = 0x200
-	seek_cur            = 1
-	seek_end            = 2
-	seek_set            = 0
-)
+pub const at_fdcwd = -100
+pub const at_empty_path = 0x1000
+pub const at_symlink_follow = 0x400
+pub const at_symlink_nofollow = 0x100
+pub const at_removedir = 0x200
+pub const at_eaccess = 0x200
+pub const seek_cur = 1
+pub const seek_end = 2
+pub const seek_set = 0
 
 interface FileSystem {
 mut:
@@ -30,17 +28,17 @@ mut:
 	mount(&VFSNode, string, &VFSNode) ?&VFSNode
 	create(&VFSNode, string, u32) &VFSNode
 	symlink(&VFSNode, string, string) &VFSNode
-	link(&VFSNode, string, &VFSNode) ?&VFSNode
+	link(&VFSNode, string, mut VFSNode) ?&VFSNode
 }
 
 pub struct VFSNode {
 pub mut:
-	mountpoint     &VFSNode = unsafe { nil }
-	redir          &VFSNode = unsafe { nil }
+	mountpoint     &VFSNode           = unsafe { nil }
+	redir          &VFSNode           = unsafe { nil }
 	resource       &resource.Resource = unsafe { nil }
 	filesystem     &FileSystem        = unsafe { nil }
 	name           string
-	parent         &VFSNode = unsafe { nil }
+	parent         &VFSNode             = unsafe { nil }
 	children       &map[string]&VFSNode = unsafe { nil }
 	symlink_target string
 }
@@ -53,12 +51,12 @@ __global (
 
 pub fn create_node(filesystem &FileSystem, parent &VFSNode, name string, dir bool) &VFSNode {
 	mut node := &VFSNode{
-		name: name
-		parent: unsafe { parent }
+		name:       name
+		parent:     unsafe { parent }
 		mountpoint: unsafe { nil }
-		redir: unsafe { nil }
-		children: unsafe { nil }
-		resource: &resource.Resource(unsafe { nil })
+		redir:      unsafe { nil }
+		children:   unsafe { nil }
+		resource:   &resource.Resource(unsafe { nil })
 		filesystem: unsafe { filesystem }
 	}
 	if dir {
@@ -121,6 +119,9 @@ fn path2node(parent &VFSNode, path string) (&VFSNode, &VFSNode, string) {
 
 	for {
 		mut elem := []u8{}
+		defer {
+			unsafe { elem.free() }
+		}
 
 		for index < path.len && path[index] != `/` {
 			elem << path[index]
@@ -205,7 +206,11 @@ pub fn get_node(parent &VFSNode, path string, follow_links bool) ?&VFSNode {
 		return none
 	}
 	if follow_links == true {
-		return reduce_node(node, true)
+		ret := reduce_node(node, true)
+		if unsafe { ret == 0 } {
+			return none
+		}
+		return ret
 	}
 	return node
 }
@@ -266,7 +271,7 @@ pub fn mount(parent &VFSNode, source string, target string, filesystem string) ?
 		return none
 	}
 
-	mut f_sys := filesystems[filesystem].instantiate()
+	mut f_sys := unsafe { filesystems[filesystem].instantiate() }
 
 	mut mount_node := f_sys.mount(parent_of_tgt_node, basename, source_node)?
 
@@ -295,6 +300,9 @@ fn (mut node VFSNode) create_dotentries(parent &VFSNode) {
 
 pub fn pathname(node &VFSNode) string {
 	mut components := []string{}
+	defer {
+		unsafe { components.free() }
+	}
 
 	mut current_node := unsafe { node }
 
@@ -340,9 +348,24 @@ pub fn unlink(parent &VFSNode, name string, remove_dir bool) ? {
 		return none
 	}
 
-	if stat.isdir(node.resource.stat.mode) && remove_dir == false {
-		errno.set(errno.eisdir)
-		return none
+	if stat.isdir(node.resource.stat.mode) {
+		if remove_dir == false {
+			errno.set(errno.eisdir)
+			return none
+		}
+
+		if node.children.len > 2 {
+			errno.set(errno.enotempty)
+			return none
+		}
+
+		unsafe {
+			free(node.children['.'].children)
+			free(node.children['.'])
+			free(node.children['..'].children)
+			free(node.children['..'])
+			free(node.children)
+		}
 	}
 
 	parent_of_tgt.children.delete(basename)
@@ -411,6 +434,52 @@ pub fn syscall_unlinkat(_ voidptr, dirfd int, _path charptr, flags int) (u64, u6
 	remove_dir := flags & fs.at_removedir != 0
 
 	unlink(parent, path, remove_dir) or { return errno.err, errno.get() }
+
+	return 0, 0
+}
+
+pub fn syscall_rmdirat(_ voidptr, dirfd int, _path charptr) (u64, u64) {
+	mut current_thread := proc.current_thread()
+	mut process := current_thread.process
+
+	C.printf(c'\n\e[32m%s\e[m: rmdirat(%d, %s)\n', process.name.str, dirfd, _path)
+	defer {
+		C.printf(c'\e[32m%s\e[m: returning\n', process.name.str)
+	}
+
+	path := unsafe { cstring_to_vstring(_path) }
+
+	if path.len == 0 {
+		return errno.err, errno.enoent
+	}
+
+	parent := get_parent_dir(dirfd, path) or { return errno.err, errno.get() }
+
+	mut parent_of_tgt_node, mut target_node, basename := path2node(parent, path)
+
+	if unsafe { parent_of_tgt_node == 0 } {
+		return errno.err, errno.enoent
+	}
+
+	if unsafe { target_node == 0 } {
+		return errno.err, errno.enoent
+	}
+
+	if target_node.children.len > 2 {
+		return errno.err, errno.enotempty
+	}
+
+	target_node.resource.unlink(unsafe { nil }) or {}
+	target_node.resource.unref(unsafe { nil }) or {}
+
+	unsafe {
+		free(target_node.children['.'].children)
+		free(target_node.children['.'])
+		free(target_node.children['..'].children)
+		free(target_node.children['..'])
+		free(target_node.children)
+	}
+	parent_of_tgt_node.children.delete(basename)
 
 	return 0, 0
 }
@@ -580,7 +649,7 @@ pub fn syscall_close(_ voidptr, fdnum int) (u64, u64) {
 		C.printf(c'\e[32m%s\e[m: returning\n', process.name.str)
 	}
 
-	file.fdnum_close(unsafe { nil }, fdnum) or { return errno.err, errno.get() }
+	file.fdnum_close(unsafe { nil }, fdnum, true) or { return errno.err, errno.get() }
 	return 0, 0
 }
 
@@ -705,7 +774,7 @@ pub fn syscall_fstat(_ voidptr, fdnum int, statbuf &stat.Stat) (u64, u64) {
 	}
 
 	unsafe {
-		statbuf[0] = fd.handle.resource.stat
+		*statbuf = fd.handle.resource.stat
 	}
 	return 0, 0
 }
@@ -743,9 +812,9 @@ pub fn syscall_linkat(_ voidptr, olddirfd int, _oldpath charptr, newdirfd int, _
 
 	follow_links := flags & fs.at_symlink_nofollow == 0
 
-	old_node := get_node(oldparent, oldpath, follow_links) or { return errno.err, errno.get() }
+	mut old_node := get_node(oldparent, oldpath, follow_links) or { return errno.err, errno.get() }
 
-	mut new_node := newparent.filesystem.link(newparent, newpath, old_node) or {
+	mut new_node := newparent.filesystem.link(newparent, newpath, mut old_node) or {
 		return errno.err, errno.get()
 	}
 
@@ -804,16 +873,14 @@ pub fn syscall_chdir(_ voidptr, _path charptr) (u64, u64) {
 
 fn C.strcpy(charptr, charptr) charptr
 
-pub fn syscall_readdir(_ voidptr, fdnum int, _buf &stat.Dirent) (u64, u64) {
+pub fn syscall_readdir(_ voidptr, fdnum int, mut buf stat.Dirent) (u64, u64) {
 	mut current_thread := proc.current_thread()
 	mut process := current_thread.process
 
-	C.printf(c'\n\e[32m%s\e[m: readdir(%d, 0x%llx)\n', process.name.str, fdnum, _buf)
+	C.printf(c'\n\e[32m%s\e[m: readdir(%d, 0x%llx)\n', process.name.str, fdnum, buf)
 	defer {
 		C.printf(c'\e[32m%s\e[m: returning\n', process.name.str)
 	}
-
-	mut buf := unsafe { _buf }
 
 	mut dir_fd := file.fd_from_fdnum(unsafe { nil }, fdnum) or { return errno.err, errno.get() }
 	defer {
@@ -833,7 +900,7 @@ pub fn syscall_readdir(_ voidptr, fdnum int, _buf &stat.Dirent) (u64, u64) {
 		dir_handle.dirlist.clear()
 		mut i := u64(0)
 		for name, mut orig_node in dir_node.children {
-			node := reduce_node(unsafe { orig_node[0] }, false)
+			node := reduce_node(unsafe { *orig_node }, false)
 			t := match node.resource.stat.mode & stat.ifmt {
 				stat.ifchr {
 					stat.dt_chr
@@ -861,10 +928,10 @@ pub fn syscall_readdir(_ voidptr, fdnum int, _buf &stat.Dirent) (u64, u64) {
 				}
 			}
 			mut new_dirent := stat.Dirent{
-				ino: node.resource.stat.ino
-				off: i++
+				ino:    node.resource.stat.ino
+				off:    i++
 				reclen: u16(sizeof(stat.Dirent))
-				@type: u8(t)
+				@type:  u8(t)
 			}
 			C.strcpy(&new_dirent.name[0], name.str)
 			dir_handle.dirlist << new_dirent
@@ -878,7 +945,7 @@ pub fn syscall_readdir(_ voidptr, fdnum int, _buf &stat.Dirent) (u64, u64) {
 	}
 
 	unsafe {
-		buf[0] = dir_handle.dirlist[dir_handle.dirlist_index]
+		*buf = dir_handle.dirlist[dir_handle.dirlist_index]
 	}
 	dir_handle.dirlist_index++
 

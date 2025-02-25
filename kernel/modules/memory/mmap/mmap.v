@@ -12,17 +12,15 @@ import x86.cpu
 import x86.cpu.local as cpulocal
 import lib
 
-pub const (
-	prot_none     = 0x00
-	prot_read     = 0x01
-	prot_write    = 0x02
-	prot_exec     = 0x04
-	map_private   = 0x02
-	map_shared    = 0x01
-	map_fixed     = 0x10
-	map_anon      = 0x20
-	map_anonymous = 0x20
-)
+pub const prot_none = 0x00
+pub const prot_read = 0x01
+pub const prot_write = 0x02
+pub const prot_exec = 0x04
+pub const map_private = 0x02
+pub const map_shared = 0x01
+pub const map_fixed = 0x10
+pub const map_anon = 0x20
+pub const map_anonymous = 0x20
 
 pub struct MmapRangeLocal {
 pub mut:
@@ -49,8 +47,10 @@ pub fn list_ranges(pagemap &memory.Pagemap) {
 	C.printf(c'Ranges for %llx:\n', voidptr(pagemap))
 	for i := u64(0); i < pagemap.mmap_ranges.len; i++ {
 		r := unsafe { &MmapRangeLocal(pagemap.mmap_ranges[i]) }
-		C.printf(c'\tBase: 0x%llx\tLength: 0x%llx\tOffset: 0x%llx\n', r.base, r.length,
-			r.offset)
+		C.printf(c'                                Base: %p  Length: %p  Offset: %p\n',
+			r.base, r.length, r.offset)
+		C.printf(c'    Global: %p  Base: %p  Length: %p  Offset: %p\n', r.global, r.global.base,
+			r.global.length, r.global.offset)
 	}
 }
 
@@ -69,13 +69,19 @@ fn addr2range(pagemap &memory.Pagemap, addr u64) ?(&MmapRangeLocal, u64, u64) {
 pub fn delete_pagemap(mut pagemap memory.Pagemap) ? {
 	pagemap.l.acquire()
 
-	for ptr in pagemap.mmap_ranges {
+	mmap_ranges := pagemap.mmap_ranges
+
+	for ptr in mmap_ranges {
 		local_range := unsafe { &MmapRangeLocal(ptr) }
 
-		munmap(pagemap, voidptr(local_range.base), local_range.length) or { }
+		munmap_unlocked(mut pagemap, voidptr(local_range.base), local_range.length) or {}
 	}
 
-	unsafe { free(pagemap) }
+	unsafe {
+		mmap_ranges.free()
+		pagemap.mmap_ranges.free()
+		free(pagemap)
+	}
 }
 
 pub fn fork_pagemap(_old_pagemap &memory.Pagemap) ?&memory.Pagemap {
@@ -93,11 +99,13 @@ pub fn fork_pagemap(_old_pagemap &memory.Pagemap) ?&memory.Pagemap {
 
 		mut new_local_range := &MmapRangeLocal{
 			pagemap: unsafe { nil }
-			global: unsafe { nil }
+			global:  unsafe { nil }
 		}
 		unsafe {
-			new_local_range[0] = local_range[0]
+			*new_local_range = *local_range
 		}
+		new_local_range.pagemap = new_pagemap
+
 		if voidptr(global_range.resource) != unsafe { nil } {
 			global_range.resource.refcount++
 		}
@@ -108,12 +116,12 @@ pub fn fork_pagemap(_old_pagemap &memory.Pagemap) ?&memory.Pagemap {
 				old_pte := old_pagemap.virt2pte(i, false) or { continue }
 				new_pte := new_pagemap.virt2pte(i, true) or { return none }
 				unsafe {
-					new_pte[0] = old_pte[0]
+					*new_pte = *old_pte
 				}
 			}
 		} else {
 			mut new_global_range := &MmapRangeGlobal{
-				resource: unsafe { nil }
+				resource:       unsafe { nil }
 				shadow_pagemap: memory.Pagemap{
 					top_level: &u64(0)
 				}
@@ -124,6 +132,8 @@ pub fn fork_pagemap(_old_pagemap &memory.Pagemap) ?&memory.Pagemap {
 			new_global_range.length = global_range.length
 			new_global_range.offset = global_range.offset
 
+			new_local_range.global = new_global_range
+
 			new_global_range.locals = []&MmapRangeLocal{}
 			new_global_range.locals << new_local_range
 
@@ -132,7 +142,7 @@ pub fn fork_pagemap(_old_pagemap &memory.Pagemap) ?&memory.Pagemap {
 			if local_range.flags & mmap.map_anonymous != 0 {
 				for i := local_range.base; i < local_range.base + local_range.length; i += page_size {
 					old_pte := old_pagemap.virt2pte(i, false) or { continue }
-					if unsafe { old_pte[0] & 1 } == 0 {
+					if unsafe { *old_pte } & 1 == 0 {
 						continue
 					}
 					new_pte := new_pagemap.virt2pte(i, true) or { return none }
@@ -140,9 +150,9 @@ pub fn fork_pagemap(_old_pagemap &memory.Pagemap) ?&memory.Pagemap {
 					page := memory.pmm_alloc_nozero(1)
 					unsafe {
 						C.memcpy(voidptr(u64(page) + higher_half), voidptr(
-							(old_pte[0] & ~(u64(0xfff))) + higher_half), page_size)
-						new_pte[0] = (old_pte[0] & u64(0xfff)) | u64(page)
-						new_spte[0] = new_pte[0]
+							(*old_pte & memory.pte_flags_mask) + higher_half), page_size)
+						*new_pte = (*old_pte & ~memory.pte_flags_mask) | u64(page)
+						*new_spte = *new_pte
 					}
 				}
 			} else {
@@ -163,8 +173,9 @@ pub fn map_page_in_range(_g &MmapRangeGlobal, virt_addr u64, phys_addr u64, prot
 	if prot & mmap.prot_write != 0 {
 		pt_flags |= memory.pte_writable
 	}
-
-	g.shadow_pagemap.map_page(virt_addr, phys_addr, pt_flags) or { return none }
+	if prot & mmap.prot_exec == 0 {
+		pt_flags |= memory.pte_noexec
+	}
 
 	g.shadow_pagemap.map_page(virt_addr, phys_addr, pt_flags) or { return none }
 
@@ -177,27 +188,26 @@ pub fn map_page_in_range(_g &MmapRangeGlobal, virt_addr u64, phys_addr u64, prot
 	}
 }
 
-pub fn map_range(_pagemap &memory.Pagemap, _virt_addr u64, phys_addr u64, _length u64, prot int, _flags int) ? {
-	mut pagemap := unsafe { _pagemap }
+pub fn map_range(mut pagemap memory.Pagemap, _virt_addr u64, phys_addr u64, _length u64, prot int, _flags int) ? {
 	flags := _flags | mmap.map_anonymous
 
 	virt_addr := lib.align_down(_virt_addr, page_size)
 	length := lib.align_up(_length + (_virt_addr - virt_addr), page_size)
 
 	mut range_local := &MmapRangeLocal{
-		pagemap: pagemap
-		base: virt_addr
-		length: length
-		prot: prot
-		flags: flags
-		global: unsafe { nil }
+		pagemap: unsafe { pagemap }
+		base:    virt_addr
+		length:  length
+		prot:    prot
+		flags:   flags
+		global:  unsafe { nil }
 	}
 
 	mut range_global := &MmapRangeGlobal{
-		locals: []&MmapRangeLocal{}
-		base: virt_addr
-		length: length
-		resource: unsafe { nil }
+		locals:         []&MmapRangeLocal{}
+		base:           virt_addr
+		length:         length
+		resource:       unsafe { nil }
 		shadow_pagemap: memory.Pagemap{
 			top_level: &u64(0)
 		}
@@ -285,7 +295,7 @@ pub fn mmap(_pagemap &memory.Pagemap, addr voidptr, _length u64, prot int, flags
 	if flags & mmap.map_fixed != 0 {
 		base = u64(addr)
 
-		munmap(pagemap, voidptr(base), length)?
+		munmap(mut pagemap, voidptr(base), length)?
 	} else {
 		base = process.mmap_anon_non_fixed_base
 		process.mmap_anon_non_fixed_base += length + page_size
@@ -293,20 +303,20 @@ pub fn mmap(_pagemap &memory.Pagemap, addr voidptr, _length u64, prot int, flags
 
 	mut range_local := &MmapRangeLocal{
 		pagemap: pagemap
-		base: base
-		length: length
-		offset: offset
-		prot: prot
-		flags: flags
-		global: unsafe { nil }
+		base:    base
+		length:  length
+		offset:  offset
+		prot:    prot
+		flags:   flags
+		global:  unsafe { nil }
 	}
 
 	mut range_global := &MmapRangeGlobal{
-		locals: []&MmapRangeLocal{}
-		base: base
-		length: length
-		resource: resource_
-		offset: offset
+		locals:         []&MmapRangeLocal{}
+		base:           base
+		length:         length
+		resource:       resource_
+		offset:         offset
 		shadow_pagemap: memory.Pagemap{
 			top_level: &u64(0)
 		}
@@ -337,7 +347,7 @@ pub fn syscall_munmap(_ voidptr, addr voidptr, length u64) (u64, u64) {
 		C.printf(c'\e[32m%s\e[m: returning\n', process.name.str)
 	}
 
-	munmap(process.pagemap, addr, length) or { return errno.err, errno.get() }
+	munmap(mut process.pagemap, addr, length) or { return errno.err, errno.get() }
 
 	return 0, 0
 }
@@ -352,14 +362,21 @@ pub fn syscall_mprotect(_ voidptr, addr voidptr, length u64, prot int) (u64, u64
 		C.printf(c'\e[32m%s\e[m: returning\n', process.name.str)
 	}
 
-	mprotect(process.pagemap, addr, length, prot) or { return errno.err, errno.get() }
+	mprotect(mut process.pagemap, addr, length, prot) or { return errno.err, errno.get() }
 
 	return 0, 0
 }
 
-pub fn mprotect(_pagemap &memory.Pagemap, addr voidptr, _length u64, prot int) ? {
-	mut pagemap := unsafe { _pagemap }
+pub fn mprotect(mut pagemap memory.Pagemap, addr voidptr, len u64, prot int) ? {
+	pagemap.l.acquire()
+	defer {
+		pagemap.l.release()
+	}
 
+	mprotect_unlocked(mut pagemap, addr, len, prot)?
+}
+
+pub fn mprotect_unlocked(mut pagemap memory.Pagemap, addr voidptr, _length u64, prot int) ? {
 	if _length == 0 {
 		C.printf(c'munmap: length is 0\n')
 		errno.set(errno.einval)
@@ -370,6 +387,8 @@ pub fn mprotect(_pagemap &memory.Pagemap, addr voidptr, _length u64, prot int) ?
 
 	for i := u64(addr); i < u64(addr) + length; i += page_size {
 		mut local_range, _, _ := addr2range(pagemap, i) or { continue }
+
+		mut global_range := local_range.global
 
 		if local_range.prot == prot {
 			continue
@@ -389,13 +408,14 @@ pub fn mprotect(_pagemap &memory.Pagemap, addr voidptr, _length u64, prot int) ?
 			// Create new range for portion after snip
 			mut postsplit_range := &MmapRangeLocal{
 				pagemap: local_range.pagemap
-				base: snip_end
-				length: (local_range.base + local_range.length) - snip_end
-				offset: local_range.offset + i64(snip_end - local_range.base)
-				prot: local_range.prot
-				flags: local_range.flags
-				global: local_range.global
+				base:    snip_end
+				length:  (local_range.base + local_range.length) - snip_end
+				offset:  local_range.offset + i64(snip_end - local_range.base)
+				prot:    local_range.prot
+				flags:   local_range.flags
+				global:  local_range.global
 			}
+			global_range.locals << postsplit_range
 			pagemap.mmap_ranges << postsplit_range
 			local_range.length -= postsplit_range.length
 		}
@@ -405,33 +425,48 @@ pub fn mprotect(_pagemap &memory.Pagemap, addr voidptr, _length u64, prot int) ?
 			if prot & mmap.prot_write != 0 {
 				pt_flags |= memory.pte_writable
 			}
+			if prot & mmap.prot_exec == 0 {
+				pt_flags |= memory.pte_noexec
+			}
 			pagemap.flag_page(j, pt_flags) or {}
 		}
 
-		new_offset := local_range.offset + i64(snip_begin - local_range.base)
+		if snip_size == local_range.length {
+			local_range.prot = prot
+		} else {
+			new_offset := local_range.offset + i64(snip_begin - local_range.base)
 
-		if snip_begin == local_range.base {
-			local_range.offset += i64(snip_size)
-			local_range.base = snip_end
-		}
-		local_range.length -= snip_size
+			if snip_begin == local_range.base {
+				local_range.offset += i64(snip_size)
+				local_range.base = snip_end
+			}
+			local_range.length -= snip_size
 
-		mut new_range := &MmapRangeLocal{
-			pagemap: local_range.pagemap
-			base: snip_begin
-			length: snip_size
-			offset: new_offset
-			prot: prot
-			flags: local_range.flags
-			global: local_range.global
+			mut new_range := &MmapRangeLocal{
+				pagemap: local_range.pagemap
+				base:    snip_begin
+				length:  snip_size
+				offset:  new_offset
+				prot:    prot
+				flags:   local_range.flags
+				global:  local_range.global
+			}
+			global_range.locals << new_range
+			pagemap.mmap_ranges << new_range
 		}
-		pagemap.mmap_ranges << new_range
 	}
 }
 
-pub fn munmap(_pagemap &memory.Pagemap, addr voidptr, _length u64) ? {
-	mut pagemap := unsafe { _pagemap }
+pub fn munmap(mut pagemap memory.Pagemap, addr voidptr, len u64) ? {
+	pagemap.l.acquire()
+	defer {
+		pagemap.l.release()
+	}
 
+	munmap_unlocked(mut pagemap, addr, len)?
+}
+
+pub fn munmap_unlocked(mut pagemap memory.Pagemap, addr voidptr, _length u64) ? {
 	if _length == 0 {
 		C.printf(c'munmap: length is 0\n')
 		errno.set(errno.einval)
@@ -459,13 +494,14 @@ pub fn munmap(_pagemap &memory.Pagemap, addr voidptr, _length u64) ? {
 			// Create new range for portion after snip
 			mut postsplit_range := &MmapRangeLocal{
 				pagemap: local_range.pagemap
-				base: snip_end
-				length: (local_range.base + local_range.length) - snip_end
-				offset: local_range.offset + i64(snip_end - local_range.base)
-				prot: local_range.prot
-				flags: local_range.flags
-				global: local_range.global
+				base:    snip_end
+				length:  (local_range.base + local_range.length) - snip_end
+				offset:  local_range.offset + i64(snip_end - local_range.base)
+				prot:    local_range.prot
+				flags:   local_range.flags
+				global:  local_range.global
 			}
+			global_range.locals << postsplit_range
 			pagemap.mmap_ranges << postsplit_range
 			local_range.length -= postsplit_range.length
 		}
@@ -475,22 +511,28 @@ pub fn munmap(_pagemap &memory.Pagemap, addr voidptr, _length u64) ? {
 		}
 
 		if snip_size == local_range.length {
-			pagemap.mmap_ranges.delete(pagemap.mmap_ranges.index(local_range))
-		}
-
-		if snip_size == local_range.length && global_range.locals.len == 1 {
-			if local_range.flags & mmap.map_anonymous != 0 {
-				for j := global_range.base; j < global_range.base + global_range.length; j += page_size {
-					phys := global_range.shadow_pagemap.virt2phys(j) or { continue }
-					global_range.shadow_pagemap.unmap_page(j) or {
-						errno.set(errno.einval)
-						return none
+			if global_range.locals.len == 1 {
+				if local_range.flags & mmap.map_anonymous != 0 {
+					for j := global_range.base; j < global_range.base + global_range.length; j += page_size {
+						phys := global_range.shadow_pagemap.virt2phys(j) or { continue }
+						global_range.shadow_pagemap.unmap_page(j) or {
+							errno.set(errno.einval)
+							return none
+						}
+						memory.pmm_free(voidptr(phys), 1)
 					}
-					memory.pmm_free(voidptr(phys), 1)
+				} else {
+					// global_range.resource.munmap(i)
+				}
+				memory.pmm_free(global_range.shadow_pagemap.top_level, 1)
+				unsafe {
+					global_range.locals.free()
+					free(global_range)
 				}
 			} else {
-				// global_range.resource.munmap(i)
+				global_range.locals.delete(global_range.locals.index(local_range))
 			}
+			pagemap.mmap_ranges.delete(pagemap.mmap_ranges.index(local_range))
 			unsafe { free(local_range) }
 		} else {
 			if snip_begin == local_range.base {

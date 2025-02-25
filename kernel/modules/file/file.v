@@ -15,21 +15,19 @@ import event.eventstruct
 import memory.mmap
 import time
 
-pub const (
-	f_dupfd         = 0
-	f_dupfd_cloexec = 1030
-	f_getfd         = 1
-	f_setfd         = 2
-	f_getfl         = 3
-	f_setfl         = 4
-	f_getlk         = 5
-	f_setlk         = 6
-	f_setlkw        = 7
-	f_getown        = 8
-	f_setown        = 9
+pub const f_dupfd = 0
+pub const f_dupfd_cloexec = 1030
+pub const f_getfd = 1
+pub const f_setfd = 2
+pub const f_getfl = 3
+pub const f_setfl = 4
+pub const f_getlk = 5
+pub const f_setlk = 6
+pub const f_setlkw = 7
+pub const f_getown = 8
+pub const f_setown = 9
 
-	fd_cloexec      = 1
-)
+pub const fd_cloexec = 1
 
 pub struct Handle {
 pub mut:
@@ -51,16 +49,14 @@ mut:
 	revents i16
 }
 
-pub const (
-	pollin     = 0x01
-	pollout    = 0x04
-	pollpri    = 0x02
-	pollhup    = 0x10
-	pollerr    = 0x08
-	pollrdhup  = 0x2000
-	pollnval   = 0x20
-	pollwrnorm = 0x100
-)
+pub const pollin = 0x01
+pub const pollout = 0x04
+pub const pollpri = 0x02
+pub const pollhup = 0x10
+pub const pollerr = 0x08
+pub const pollrdhup = 0x2000
+pub const pollnval = 0x20
+pub const pollwrnorm = 0x100
 
 pub fn syscall_ppoll(_ voidptr, fds &PollFD, nfds u64, tmo_p &time.TimeSpec, sigmask &u64) (u64, u64) {
 	mut t := proc.current_thread()
@@ -78,7 +74,7 @@ pub fn syscall_ppoll(_ voidptr, fds &PollFD, nfds u64, tmo_p &time.TimeSpec, sig
 
 	oldmask := t.masked_signals
 	if voidptr(sigmask) != unsafe { nil } {
-		t.masked_signals = unsafe { sigmask[0] }
+		t.masked_signals = *sigmask
 	}
 	defer {
 		t.masked_signals = oldmask
@@ -91,6 +87,11 @@ pub fn syscall_ppoll(_ voidptr, fds &PollFD, nfds u64, tmo_p &time.TimeSpec, sig
 	defer {
 		for mut f in fdlist {
 			f.unref()
+		}
+		unsafe {
+			events.free()
+			fdnums.free()
+			fdlist.free()
 		}
 	}
 
@@ -149,6 +150,7 @@ pub fn syscall_ppoll(_ voidptr, fds &PollFD, nfds u64, tmo_p &time.TimeSpec, sig
 	defer {
 		if voidptr(timer) != unsafe { nil } {
 			timer.disarm()
+			unsafe { free(timer) }
 		}
 	}
 
@@ -212,7 +214,7 @@ pub fn (mut this FD) unref() {
 	this.handle.refcount--
 }
 
-pub fn fdnum_close(_process &proc.Process, fdnum int) ? {
+pub fn fdnum_close(_process &proc.Process, fdnum int, do_lock bool) ? {
 	mut process := &proc.Process(unsafe { nil })
 	if voidptr(_process) == unsafe { nil } {
 		process = proc.current_thread().process
@@ -225,9 +227,13 @@ pub fn fdnum_close(_process &proc.Process, fdnum int) ? {
 		return none
 	}
 
-	process.fds_lock.acquire()
+	if do_lock {
+		process.fds_lock.acquire()
+	}
 	defer {
-		process.fds_lock.release()
+		if do_lock {
+			process.fds_lock.release()
+		}
 	}
 
 	mut fd := unsafe { &FD(process.fds[fdnum]) }
@@ -273,22 +279,21 @@ pub fn fdnum_create_from_fd(_process &proc.Process, fd &FD, oldfd int, specific 
 		}
 		return none
 	} else {
-		// fdnum_close(process, oldfd) or {}
+		fdnum_close(process, oldfd, false) or {}
 		process.fds[oldfd] = voidptr(fd)
 		return oldfd
 	}
 }
 
 pub fn fd_create_from_resource(mut res resource.Resource, flags int) ?&FD {
-	katomic.inc(res.refcount)
+	katomic.inc(mut &res.refcount)
 
-	mut new_handle := unsafe { &Handle(C.malloc(sizeof(Handle))) }
+	mut new_handle := &Handle{}
 	new_handle.resource = unsafe { res }
 	new_handle.refcount = 1
 	new_handle.flags = flags & resource.file_status_flags_mask
-	new_handle.dirlist = []stat.Dirent{}
 
-	mut new_fd := unsafe { &FD(C.malloc(sizeof(FD))) }
+	mut new_fd := &FD{}
 	new_fd.handle = new_handle
 	new_fd.flags = flags & resource.file_descriptor_flags_mask
 

@@ -21,23 +21,21 @@ import file
 import userland
 import proc
 import katomic
-import flanterm
+import flanterm as _
 
-const (
-	max_scancode        = 0x57
-	capslock            = 0x3a
-	numlock             = 0x45
-	left_alt            = 0x38
-	left_alt_rel        = 0xb8
-	right_shift         = 0x36
-	left_shift          = 0x2a
-	right_shift_rel     = 0xb6
-	left_shift_rel      = 0xaa
-	ctrl                = 0x1d
-	ctrl_rel            = 0x9d
-	console_buffer_size = 1024
-	console_bigbuf_size = 4096
-)
+const max_scancode = 0x57
+const capslock = 0x3a
+const numlock = 0x45
+const left_alt = 0x38
+const left_alt_rel = 0xb8
+const right_shift = 0x36
+const left_shift = 0x2a
+const right_shift_rel = 0xb6
+const left_shift_rel = 0xaa
+const ctrl = 0x1d
+const ctrl_rel = 0x9d
+const console_buffer_size = 1024
+const console_bigbuf_size = 4096
 
 __global (
 	console_convtab_numpad_numlock map[u8]u8
@@ -50,9 +48,9 @@ __global (
 	console_ctrl_active            = bool(false)
 	console_alt_active             = bool(false)
 	console_extra_scancodes        = bool(false)
-	console_buffer                 [console_buffer_size]u8
+	console_buffer                 [console.console_buffer_size]u8
 	console_buffer_i               = u64(0)
-	console_bigbuf                 [console_bigbuf_size]u8
+	console_bigbuf                 [console.console_bigbuf_size]u8
 	console_bigbuf_i               = u64(0)
 	console_termios                = &termios.Termios(unsafe { nil })
 	console_decckm                 = false
@@ -312,8 +310,8 @@ fn is_printable(c u8) bool {
 fn add_to_buf_char(_c u8, echo bool) {
 	mut c := _c
 
-	if c == `\n` && console_termios.c_iflag & termios.icrnl == 0 {
-		c = `\r`
+	if c == `\r` && console_termios.c_iflag & termios.icrnl == 0 {
+		c = `\n`
 	}
 
 	if console_termios.c_lflag & termios.icanon != 0 {
@@ -415,6 +413,35 @@ fn keyboard_handler() {
 
 	apic.io_apic_set_irq_redirect(cpu_locals[0].lapic_id, vect, 1, true)
 
+	// Disable primary and secondary PS/2 ports
+	write_ps2(0x64, 0xad)
+	write_ps2(0x64, 0xa7)
+
+	// Read from port 0x60 to flush the PS/2 controller buffer
+	for kio.port_in[u8](0x64) & 1 != 0 {
+		kio.port_in[u8](0x60)
+	}
+
+	mut ps2_config := read_ps2_config()
+
+	// Enable keyboard interrupt and keyboard scancode translation
+	ps2_config |= (1 << 0) | (1 << 6)
+
+	// Enable mouse interrupt if any
+	if ps2_config & (1 << 5) != 0 {
+		ps2_config |= (1 << 1)
+	}
+
+	write_ps2_config(ps2_config)
+
+	// Enable keyboard port
+	write_ps2(0x64, 0xae)
+
+	// Enable mouse port if any
+	if ps2_config & (1 << 5) != 0 {
+		write_ps2(0x64, 0xa8)
+	}
+
 	console_convtab_numpad_numlock = {
 		u8(0x37): u8(`*`)
 		u8(0x4a): u8(`-`)
@@ -435,6 +462,7 @@ fn keyboard_handler() {
 	for {
 		mut events := [&int_events[vect]]
 		event.await(mut events, true) or {}
+		unsafe { events.free() }
 		input_byte := read_ps2()
 
 		if input_byte == 0xe0 {
@@ -632,7 +660,7 @@ fn dec_private(esc_val_count u64, esc_values &u32, final u64) {
 	}
 }
 
-pub fn flanterm_callback(p &flanterm.Context, t u64, a u64, b u64, c u64) {
+pub fn flanterm_callback(p voidptr, t u64, a u64, b u64, c u64) {
 	C.printf(c'Flanterm callback called\n')
 
 	match t {
@@ -644,7 +672,7 @@ pub fn flanterm_callback(p &flanterm.Context, t u64, a u64, b u64, c u64) {
 }
 
 pub fn initialise() {
-	C.flanterm_set_callback(mut flanterm_ctx, voidptr(flanterm_callback))
+	C.flanterm_set_callback(flanterm_ctx, voidptr(flanterm_callback))
 
 	console_res = &Console{}
 	console_res.stat.size = 0
@@ -664,35 +692,6 @@ pub fn initialise() {
 	console_res.status |= file.pollout
 
 	fs.devtmpfs_add_device(console_res, 'console')
-
-	// Disable primary and secondary PS/2 ports
-	write_ps2(0x64, 0xad)
-	write_ps2(0x64, 0xa7)
-
-	// Read from port 0x60 to flush the PS/2 controller buffer
-	for kio.port_in[u8](0x64) & 1 != 0 {
-		kio.port_in[u8](0x60)
-	}
-
-	mut ps2_config := read_ps2_config()
-
-	// Enable keyboard interrupt and keyboard scancode translation
-	ps2_config |= (1 << 0) | (1 << 6)
-
-	// Enable mouse interrupt if any
-	if ps2_config & (1 << 5) != 0 {
-		ps2_config |= (1 << 1)
-	}
-
-	write_ps2_config(ps2_config)
-
-	// Enable keyboard port
-	write_ps2(0x64, 0xae)
-
-	// Enable mouse port if any
-	if ps2_config & (1 << 5) != 0 {
-		write_ps2(0x64, 0xa8)
-	}
 
 	spawn keyboard_handler()
 }
@@ -721,9 +720,11 @@ fn (mut this Console) read(handle voidptr, void_buf voidptr, loc u64, count u64)
 	for console_read_lock.test_and_acquire() == false {
 		mut events := [&console_event]
 		event.await(mut events, true) or {
+			unsafe { events.free() }
 			errno.set(errno.eintr)
 			return none
 		}
+		unsafe { events.free() }
 	}
 
 	mut wait := true
@@ -738,7 +739,7 @@ fn (mut this Console) read(handle voidptr, void_buf voidptr, loc u64, count u64)
 			for j := u64(0); j < console_bigbuf_i; j++ {
 				console_bigbuf[j] = console_bigbuf[j + 1]
 			}
-			if console_bigbuf_i == 0 && (console_res.status & file.pollin != 0) {
+			if console_bigbuf_i == 0 && console_res.status & file.pollin != 0 {
 				console_res.status &= ~file.pollin
 				event.trigger(mut console_res.event, false)
 			}
@@ -749,9 +750,11 @@ fn (mut this Console) read(handle voidptr, void_buf voidptr, loc u64, count u64)
 				for {
 					mut events := [&console_event]
 					event.await(mut events, true) or {
+						unsafe { events.free() }
 						errno.set(errno.eintr)
 						return none
 					}
+					unsafe { events.free() }
 					if console_read_lock.test_and_acquire() == true {
 						break
 					}
@@ -794,7 +797,7 @@ fn (mut this Console) ioctl(handle voidptr, request u64, argp voidptr) ?int {
 		ioctl.tcgets {
 			mut t := unsafe { &termios.Termios(argp) }
 			unsafe {
-				t[0] = this.termios
+				*t = this.termios
 			}
 			return 0
 		}
@@ -802,7 +805,7 @@ fn (mut this Console) ioctl(handle voidptr, request u64, argp voidptr) ?int {
 		ioctl.tcsets, ioctl.tcsetsw, ioctl.tcsetsf {
 			mut t := unsafe { &termios.Termios(argp) }
 			unsafe {
-				this.termios = t[0]
+				this.termios = *t
 			}
 			return 0
 		}
@@ -813,15 +816,15 @@ fn (mut this Console) ioctl(handle voidptr, request u64, argp voidptr) ?int {
 }
 
 fn (mut this Console) unref(handle voidptr) ? {
-	katomic.dec(this.refcount)
+	katomic.dec(mut &this.refcount)
 }
 
 fn (mut this Console) link(handle voidptr) ? {
-	katomic.inc(this.stat.nlink)
+	katomic.inc(mut &this.stat.nlink)
 }
 
 fn (mut this Console) unlink(handle voidptr) ? {
-	katomic.dec(this.stat.nlink)
+	katomic.dec(mut &this.stat.nlink)
 }
 
 fn (mut this Console) grow(handle voidptr, new_size u64) ? {

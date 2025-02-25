@@ -8,12 +8,10 @@ import event.eventstruct
 import klock
 import limine
 
-pub const (
-	timer_frequency = u64(1000)
+pub const timer_frequency = u64(1000)
 
-	clock_type_realtime = 0
-	clock_type_monotonic = 1
-)
+pub const clock_type_realtime = 0
+pub const clock_type_monotonic = 1
 
 pub struct TimeSpec {
 pub mut:
@@ -59,16 +57,23 @@ pub fn (mut this TimeSpec) sub(interval TimeSpec) bool {
 
 __global (
 	monotonic_clock TimeSpec
-	realtime_clock TimeSpec
+	realtime_clock  TimeSpec
 )
 
+@[_linker_section: '.requests']
 @[cinit]
 __global (
-	volatile boottime_req = limine.LimineBootTimeRequest{response: 0}
+	volatile boottime_req = limine.LimineBootTimeRequest{
+		response: unsafe { nil }
+	}
 )
 
 pub fn initialise() {
-	epoch := boottime_req.response.boot_time
+	epoch := if boottime_req.response != unsafe { nil } {
+		boottime_req.response.boot_time
+	} else {
+		0
+	}
 
 	monotonic_clock = TimeSpec{i64(epoch), 0}
 	realtime_clock = TimeSpec{i64(epoch), 0}
@@ -79,7 +84,7 @@ pub fn initialise() {
 fn C.event__trigger(mut event eventstruct.Event, drop bool) u64
 
 fn timer_handler() {
-	interval := TimeSpec{0, i64(1000000000 / timer_frequency)}
+	interval := TimeSpec{0, i64(1000000000 / time.timer_frequency)}
 
 	monotonic_clock.add(interval)
 	realtime_clock.add(interval)
@@ -109,7 +114,7 @@ pub mut:
 }
 
 __global (
-	timers_lock klock.Lock
+	timers_lock  klock.Lock
 	armed_timers []&Timer
 )
 
@@ -144,7 +149,7 @@ pub fn (mut this Timer) arm() {
 
 pub fn new_timer(when TimeSpec) &Timer {
 	mut timer := &Timer{
-		when: when
+		when:  when
 		fired: false
 		index: -1
 	}

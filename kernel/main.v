@@ -4,12 +4,12 @@
 
 module main
 
-import lib
 import lib.stubs
 // unused, but needed for C function stubs
 import memory
 import term
 import acpi
+import uacpi
 import x86.gdt
 import x86.idt
 import x86.isr
@@ -20,7 +20,6 @@ import sched
 import stat
 import dev.console
 import userland
-import kprint
 import pipe
 import futex
 import pci
@@ -31,11 +30,24 @@ import dev.nvme
 import dev.serial
 import dev.streams
 import dev.ahci
+import dev.hda
 import dev.random
 import dev.mouse
 import syscall.table
 import socket
 import time
+import x86.hpet
+import limine
+
+#include <symbols.h>
+
+@[_linker_section: '.requests']
+@[cinit]
+__global (
+	volatile limine_base_revision = limine.LimineBaseRevision{
+		revision: 2
+	}
+)
 
 fn C._vinit(argc int, argv voidptr)
 
@@ -62,6 +74,7 @@ fn kmain_thread() {
 	console.initialise()
 	serial.initialise()
 	mouse.initialise()
+	hda.initialize()
 
 	$if !prod {
 		ata.initialise()
@@ -69,8 +82,8 @@ fn kmain_thread() {
 		ahci.initialise()
 	}
 
-	userland.start_program(false, vfs_root, '/sbin/init', ['/sbin/init'], [],
-	'/dev/console', '/dev/console', '/dev/console') or { panic('Could not start init process') }
+	userland.start_program(false, vfs_root, '/sbin/init', ['/sbin/init'], [], '/dev/console',
+		'/dev/console', '/dev/console') or { panic('Could not start init process') }
 
 	sched.dequeue_and_die()
 }
@@ -80,6 +93,11 @@ pub fn main() {
 }
 
 pub fn kmain() {
+	// Ensure the base revision is supported.
+	if limine_base_revision.revision != 0 {
+		for {}
+	}
+
 	// Initialize the memory allocator.
 	memory.pmm_init()
 
@@ -91,12 +109,11 @@ pub fn kmain() {
 	idt.initialise()
 	isr.initialise()
 
+	x2apic_mode = smp_req.response.flags & 1 != 0
+
 	// Init terminal
 	term.initialise()
 	serial.early_initialise()
-
-	// We're alive
-	kprint.kwrite(c'Welcome to Vinix\n\n')
 
 	// a dummy call to avoid V warning about an unused `stubs` module
 	_ := stubs.toupper(0)
@@ -105,6 +122,19 @@ pub fn kmain() {
 
 	// ACPI init
 	acpi.initialise()
+	hpet.initialise()
+
+	mut uacpi_status := uacpi.UACPIStatus.ok
+
+	uacpi_status = C.uacpi_initialize(0)
+	if uacpi_status != uacpi.UACPIStatus.ok {
+		panic('uacpi_initialize(): ${C.uacpi_status_to_string(uacpi_status)}')
+	}
+
+	uacpi_status = C.uacpi_namespace_load()
+	if uacpi_status != uacpi.UACPIStatus.ok {
+		panic('uacpi_namespace_load(): ${C.uacpi_status_to_string(uacpi_status)}')
+	}
 
 	smp.initialise()
 

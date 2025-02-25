@@ -11,10 +11,19 @@ import limine
 
 __global (
 	pmm_lock            klock.Lock
-	pmm_bitmap          = voidptr(0)
+	pmm_bitmap          = unsafe { nil }
 	pmm_avl_page_count  = u64(0)
 	pmm_last_used_index = u64(0)
 	free_pages          = u64(0)
+	higher_half         = u64(0)
+)
+
+@[_linker_section: '.requests']
+@[cinit]
+__global (
+	volatile hhdm_req = limine.LimineHHDMRequest{
+		response: unsafe { nil }
+	}
 )
 
 pub fn print_free() {
@@ -26,6 +35,16 @@ pub fn print_free() {
 }
 
 pub fn pmm_init() {
+	if hhdm_req.response == unsafe { nil } {
+		lib.kpanic(unsafe { nil }, c'HHDM bootloader response missing')
+	}
+	higher_half = hhdm_req.response.offset
+
+	C.printf(c'pmm: Higher half direct map at: %p\n', higher_half)
+
+	if memmap_req.response == unsafe { nil } {
+		lib.kpanic(unsafe { nil }, c'Memory map bootloader response missing')
+	}
 	memmap := memmap_req.response
 
 	unsafe {
@@ -34,11 +53,12 @@ pub fn pmm_init() {
 
 		// Calculate how big the memory map needs to be.
 		for i := 0; i < memmap.entry_count; i++ {
-			C.printf(c'pmm: Memory map entry %d: 0x%llx->0x%llx  0x%llx\n',
-					 i, entries[i].base, entries[i].length, entries[i].@type)
+			C.printf(c'pmm: Memory map entry %d: 0x%llx->0x%llx  0x%llx\n', i, entries[i].base,
+				entries[i].length, entries[i].@type)
 
 			if entries[i].@type != u32(limine.limine_memmap_usable)
-				&& entries[i].@type != u32(limine.limine_memmap_bootloader_reclaimable) {
+				&& entries[i].@type != u32(limine.limine_memmap_bootloader_reclaimable)
+				&& entries[i].@type != u32(limine.limine_memmap_kernel_and_modules) {
 				continue
 			}
 			top := entries[i].base + entries[i].length
@@ -48,7 +68,7 @@ pub fn pmm_init() {
 		}
 
 		// Calculate the needed size for the bitmap in bytes and align it to page size.
-		pmm_avl_page_count = highest_address / page_size
+		pmm_avl_page_count = lib.div_roundup(highest_address, page_size)
 		bitmap_size := lib.align_up(pmm_avl_page_count / 8, page_size)
 
 		C.printf(c'pmm: Bitmap size: %llu\n', bitmap_size)
@@ -88,14 +108,13 @@ pub fn pmm_init() {
 	// Initialise slabs
 	slabs[0].init(8)
 	slabs[1].init(16)
-	slabs[2].init(24)
-	slabs[3].init(32)
-	slabs[4].init(48)
-	slabs[5].init(64)
-	slabs[6].init(128)
-	slabs[7].init(256)
-	slabs[8].init(512)
-	slabs[9].init(1024)
+	slabs[2].init(32)
+	slabs[3].init(64)
+	slabs[4].init(128)
+	slabs[5].init(256)
+	slabs[6].init(512)
+	slabs[7].init(1024)
+	slabs[8].init(2048)
 }
 
 fn inner_alloc(count u64, limit u64) voidptr {
@@ -134,7 +153,7 @@ pub fn pmm_alloc_nozero(count u64) voidptr {
 
 		ret = inner_alloc(count, last)
 		if ret == 0 {
-			lib.kpanic(voidptr(0), c'Out of memory')
+			lib.kpanic(unsafe { nil }, c'Out of memory')
 		}
 	}
 
@@ -160,6 +179,12 @@ pub fn pmm_free(ptr voidptr, count u64) {
 	pmm_lock.acquire()
 	defer {
 		pmm_lock.release()
+	}
+	unsafe {
+		mut p := &u64(u64(ptr) + higher_half)
+		for i := u64(0); i < (count * page_size) / 8; i++ {
+			p[i] = 0xaaaaaaaaaaaaaaaa
+		}
 	}
 	page := u64(ptr) / page_size
 	for i := page; i < page + count; i++ {
@@ -188,7 +213,7 @@ pub fn (mut this Slab) init(ent_size u64) {
 	avl_size := page_size - lib.align_up(sizeof(SlabHeader), ent_size)
 	mut slabptr := &SlabHeader(this.first_free)
 	unsafe {
-		slabptr[0].slab = this
+		(*slabptr).slab = this
 	}
 	this.first_free += lib.align_up(sizeof(SlabHeader), ent_size)
 
@@ -217,7 +242,7 @@ pub fn (mut this Slab) alloc() voidptr {
 	}
 
 	mut old_free := &u64(this.first_free)
-	this.first_free = unsafe { old_free[0] }
+	this.first_free = *old_free
 
 	unsafe { C.memset(voidptr(old_free), 0, this.ent_size) }
 
@@ -230,19 +255,21 @@ pub fn (mut this Slab) sfree(ptr voidptr) {
 		this.@lock.release()
 	}
 
-	if ptr == voidptr(0) {
+	if ptr == unsafe { nil } {
 		return
 	}
 
+	unsafe { C.memset(ptr, 0xaa, this.ent_size) }
+
 	mut new_head := &u64(ptr)
 	unsafe {
-		new_head[0] = this.first_free
+		*new_head = this.first_free
 	}
 	this.first_free = u64(new_head)
 }
 
 __global (
-	slabs [10]Slab
+	slabs [9]Slab
 )
 
 struct MallocMetadata {
@@ -253,7 +280,7 @@ mut:
 
 @[export: 'free']
 pub fn free(ptr voidptr) {
-	if ptr == voidptr(0) {
+	if ptr == unsafe { nil } {
 		return
 	}
 
@@ -285,7 +312,7 @@ fn slab_for(size u64) ?&Slab {
 
 @[export: 'malloc']
 pub fn malloc(size u64) voidptr {
-	mut slab := slab_for(8 + size) or { return big_alloc(size) }
+	mut slab := slab_for(size) or { return big_alloc(size) }
 
 	return slab.alloc()
 }

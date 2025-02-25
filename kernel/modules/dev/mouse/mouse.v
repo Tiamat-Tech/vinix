@@ -15,17 +15,16 @@ import x86.idt
 
 @[inline]
 fn wait(t int) {
-	mut timeout := 100000;
-
+	mut timeout := 100000
 	if t == 0 {
 		for ; timeout != 0; timeout-- {
-			if kio.port_in<u8>(0x64) & (1 << 0) != 0 {
+			if kio.port_in[u8](0x64) & (1 << 0) != 0 {
 				return
 			}
 		}
 	} else {
 		for ; timeout != 0; timeout-- {
-			if kio.port_in<u8>(0x64) & (1 << 1) == 0 {
+			if kio.port_in[u8](0x64) & (1 << 1) == 0 {
 				return
 			}
 		}
@@ -35,15 +34,15 @@ fn wait(t int) {
 @[inline]
 fn write(val u8) {
 	wait(1)
-	kio.port_out<u8>(0x64, 0xd4)
+	kio.port_out[u8](0x64, 0xd4)
 	wait(1)
-	kio.port_out<u8>(0x60, val)
+	kio.port_out[u8](0x60, val)
 }
 
 @[inline]
 fn read() u8 {
 	wait(0)
-	return kio.port_in<u8>(0x60)
+	return kio.port_in[u8](0x60)
 }
 
 struct MousePacket {
@@ -55,12 +54,12 @@ pub mut:
 
 struct Mouse {
 pub mut:
-	stat       stat.Stat
-	refcount   int
-	l          klock.Lock
-	event      eventstruct.Event
-	status     int
-	can_mmap   bool
+	stat     stat.Stat
+	refcount int
+	l        klock.Lock
+	event    eventstruct.Event
+	status   int
+	can_mmap bool
 
 	packet_avl bool
 	packet     MousePacket
@@ -90,6 +89,7 @@ fn (mut this Mouse) read(_handle voidptr, buf voidptr, loc u64, count u64) ?i64 
 
 		mut events := [&mouse_res.event]
 		event.await(mut events, true) or {}
+		unsafe { events.free() }
 
 		mouse_res.l.acquire()
 	}
@@ -115,22 +115,22 @@ fn (mut this Mouse) ioctl(handle voidptr, request u64, argp voidptr) ?int {
 }
 
 fn (mut this Mouse) unref(handle voidptr) ? {
-	katomic.dec(this.refcount)
+	katomic.dec(mut &this.refcount)
 }
 
 fn (mut this Mouse) link(handle voidptr) ? {
-	katomic.inc(this.stat.nlink)
+	katomic.inc(mut &this.stat.nlink)
 }
 
 fn (mut this Mouse) unlink(handle voidptr) ? {
-	katomic.dec(this.stat.nlink)
+	katomic.dec(mut &this.stat.nlink)
 }
 
 fn (mut this Mouse) grow(handle voidptr, new_size u64) ? {
 }
 
 __global (
-	mouse_res Mouse
+	mouse_res        Mouse
 	ps2_mouse_vector u8
 )
 
@@ -142,12 +142,13 @@ fn handler() {
 	for {
 		mut events := [&int_events[ps2_mouse_vector]]
 		event.await(mut events, true) or {}
+		unsafe { events.free() }
 
-        // we will get some spurious packets at the beginning and they will screw
-        // up the alignment of the handler cycle so just ignore everything in
-        // the first 250 milliseconds after boot
+		// we will get some spurious packets at the beginning and they will screw
+		// up the alignment of the handler cycle so just ignore everything in
+		// the first 250 milliseconds after boot
 		if monotonic_clock.tv_sec == 0 && monotonic_clock.tv_nsec < 250000000 {
-			kio.port_in<u8>(0x60)
+			kio.port_in[u8](0x60)
 		}
 
 		match handler_cycle {
@@ -205,7 +206,7 @@ pub fn initialise() {
 
 	mouse_res.stat.size = 0
 	mouse_res.stat.blocks = 0
-	mouse_res.stat.blksize = 512;
+	mouse_res.stat.blksize = 512
 	mouse_res.stat.rdev = resource.create_dev_id()
 	mouse_res.stat.mode = 0o644 | stat.ifchr
 

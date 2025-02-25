@@ -63,7 +63,8 @@ fn pf_handler(num u32, gpr_state &cpulocal.GPRState) {
 }
 
 fn abort_handler(num u32, gpr_state &cpulocal.GPRState) {
-	katomic.store(cpulocal.current().aborted, true)
+	mut aborted := &cpulocal.current().aborted
+	katomic.store(mut aborted, true)
 	for {
 		asm volatile amd64 {
 			hlt
@@ -85,8 +86,8 @@ fn exception_handler(num u32, gpr_state &cpulocal.GPRState) {
 		}
 
 		userland.sendsig(proc.current_thread(), signal)
-		//userland.dispatch_a_signal(gpr_state)
-		userland.syscall_exit(voidptr(0), 128 + signal)
+		// userland.dispatch_a_signal(gpr_state)
+		userland.syscall_exit(unsafe { nil }, 128 + signal)
 	} else {
 		lib.kpanic(gpr_state, isr.exception_names[num])
 	}
@@ -95,8 +96,6 @@ fn exception_handler(num u32, gpr_state &cpulocal.GPRState) {
 __global (
 	abort_vector = u8(0)
 )
-
-#include <symbols.h>
 
 fn C.interrupt_thunks()
 

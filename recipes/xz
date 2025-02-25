@@ -1,19 +1,23 @@
+#! /bin/sh
+
 name=xz
-version=5.4.6
+version=5.6.4
 revision=1
-tarball_url="https://github.com/tukaani-project/xz/releases/download/v${version}/xz-${version}.tar.gz"
-tarball_blake2b="f0bbd33ea7cd64d475c3501f6e76080c8c0080e377f23462f5f76459935f4e621538ddaa8452d2feaed278d62a596e38ed2aca18ed9e76512c4ec77fa2f4cc5f"
+tarball_url="https://github.com/tukaani-project/xz/releases/download/v${version}/xz-${version}.tar.xz"
+tarball_blake2b="777bc6b4f1510615bedac1db8bfea19e80b7652906372739fb3ed7c7905bd0aed6f78bb1ca98f4d690f0b2fc03002c16a280359dde67c655ecb9324f8d384551"
 source_hostdeps="automake autoconf libtool pkg-config"
 hostdeps="gcc autoconf automake libtool pkg-config"
 deps="core-libs"
 
-regenerate() {
+prepare() {
     autotools_recursive_regen
 }
 
-build() {
+configure() {
     autotools_configure
+}
 
+build() {
     make -j${parallelism}
 }
 
